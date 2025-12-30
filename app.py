@@ -3,36 +3,41 @@ import pandas as pd
 import database
 from session_state import init_session_state
 from auto_save import salvar_tudo
-from models import Turma, Professor, Disciplina, Sala, DIAS_SEMANA
-
-# ============================================
-# CORREÇÃO CRÍTICA: IMPORT DO OR-TOOLS
-# ============================================
-
-# Tentar importar OR-Tools com tratamento robusto
-try:
-    from scheduler_ortools import GradeHorariaORTools
-    ORTOOLS_DISPONIVEL = True
-except Exception as e:
-    ORTOOLS_DISPONIVEL = False
-    # Criar classe dummy se não conseguir importar
-    class GradeHorariaORTools:
-        def __init__(self, *args, **kwargs):
-            raise ImportError("OR-Tools não disponível. Use o algoritmo simples.")
-        
-        def resolver(self):
-            return []
-
-from simple_scheduler import SimpleGradeHoraria
+from models import Turma, Professor, Disciplina, Sala, DIAS_SEMANA, Aula
 import io
 import traceback
 from datetime import datetime
+import random
 
-# Configuração da página
+# ============================================
+# CONFIGURAÇÃO DE PÁGINA
+# ============================================
 st.set_page_config(page_title="Escola Timetable", layout="wide")
 st.title("🕒 Gerador Inteligente de Grade Horária")
 
-# Inicialização
+# ============================================
+# VERIFICAÇÃO DE ALGORITMOS
+# ============================================
+ALGORITMOS_DISPONIVEIS = True
+try:
+    from simple_scheduler import SimpleGradeHoraria
+except ImportError:
+    ALGORITMOS_DISPONIVEIS = False
+    
+    class SimpleGradeHoraria:
+        def __init__(self, *args, **kwargs):
+            self.turmas = []
+            self.professores = []
+            self.disciplinas = []
+            self.salas = []
+        
+        def gerar_grade(self):
+            st.error("❌ Algoritmo simples não disponível")
+            return []
+
+# ============================================
+# INICIALIZAÇÃO
+# ============================================
 try:
     init_session_state()
     st.success("✅ Sistema inicializado com sucesso!")
@@ -60,22 +65,20 @@ def obter_grupo_seguro(objeto, opcoes=["A", "B", "AMBOS"]):
         return "A"
 
 def obter_segmento_turma(turma_nome):
-    """Determina o segmento da turma baseado no nome - VERSÃO CORRIGIDA"""
+    """Determina o segmento da turma baseado no nome"""
     if not turma_nome:
         return "EF_II"
     
     turma_nome_lower = turma_nome.lower()
     
-    # Primeiro verificar se é EM
+    # Verificar se é EM
     if 'em' in turma_nome_lower:
         return "EM"
     # Verificar se é EF II
     elif any(x in turma_nome_lower for x in ['6', '7', '8', '9', 'ano', 'ef']):
         return "EF_II"
     else:
-        # Default: tentar inferir pela série
         try:
-            # Se a turma começa com número, provavelmente é EF II
             if turma_nome_lower[0].isdigit():
                 return "EF_II"
             else:
@@ -84,55 +87,51 @@ def obter_segmento_turma(turma_nome):
             return "EF_II"
 
 def obter_horarios_turma(turma_nome):
-    """Retorna os períodos disponíveis para a turma - VERSÃO CORRIGIDA"""
+    """Retorna os períodos disponíveis para a turma"""
     segmento = obter_segmento_turma(turma_nome)
     if segmento == "EM":
-        return [1, 2, 3, 4, 5, 6, 7]  # ✅ 7 períodos para EM
+        return [1, 2, 3, 4, 5, 6, 7]  # 7 períodos para EM
     else:
-        return [1, 2, 3, 4, 5]  # ✅ 5 períodos para EF II
+        return [1, 2, 3, 4, 5]  # 5 períodos para EF II
 
 def obter_horario_real(turma_nome, periodo):
-    """Retorna o horário real formatado - VERSÃO SIMPLIFICADA E CORRETA"""
+    """Retorna o horário real formatado"""
     segmento = obter_segmento_turma(turma_nome)
     
     if segmento == "EM":
-        # EM: 7 períodos de AULA
         horarios = {
             1: "07:00 - 07:50",
             2: "07:50 - 08:40", 
             3: "08:40 - 09:30",
-            # INTERVALO: 09:30-09:50 (não tem número)
             4: "09:50 - 10:40",
             5: "10:40 - 11:30",
             6: "11:30 - 12:20",
-            7: "12:20 - 13:10"  # ✅ ÚLTIMA AULA DO EM
+            7: "12:20 - 13:10"
         }
     else:
-        # EF II: 5 períodos de AULA
         horarios = {
             1: "07:50 - 08:40",
             2: "08:40 - 09:30",
-            # INTERVALO: 09:30-09:50 (não tem número)
             3: "09:50 - 10:40",
             4: "10:40 - 11:30",
-            5: "11:30 - 12:20"  # ✅ ÚLTIMA AULA DO EF II
+            5: "11:30 - 12:20"
         }
     
     return horarios.get(periodo, f"Período {periodo}")
 
 def calcular_carga_maxima(serie):
-    """Calcula a quantidade MÁXIMA de aulas semanais baseada na série"""
+    """Calcula a quantidade máxima de aulas semanais"""
     if not serie:
         return 25
     
     serie_lower = serie.lower()
     if 'em' in serie_lower or serie_lower in ['1em', '2em', '3em']:
-        return 35  # EM: máximo de 35 aulas por semana (7 aulas × 5 dias)
+        return 35  # EM: 7 aulas × 5 dias
     else:
-        return 25  # EF II: máximo de 25 aulas por semana (5 aulas × 5 dias)
+        return 25  # EF II: 5 aulas × 5 dias
 
 def converter_dia_para_semana(dia):
-    """Converte dia do formato completo para abreviado (DIAS_SEMANA)"""
+    """Converte dia do formato completo para abreviado"""
     if dia == "segunda": return "seg"
     elif dia == "terca": return "ter"
     elif dia == "quarta": return "qua"
@@ -166,59 +165,71 @@ def converter_disponibilidade_para_completo(disponibilidade):
     return convertido
 
 # ============================================
-# FUNÇÕES DE ACESSO SEGURO A AULAS (CORRIGIDO)
+# FUNÇÕES DE ACESSO SEGURO A AULAS (CORRIGIDAS)
 # ============================================
 
 def obter_turma_aula(aula):
-    """Obtém a turma de uma aula de forma segura (objeto ou dicionário)"""
-    if hasattr(aula, 'turma'):
+    """Obtém a turma de uma aula de forma segura"""
+    if isinstance(aula, Aula):
         return aula.turma
-    elif isinstance(aula, dict):
-        return aula.get('turma')
+    elif isinstance(aula, dict) and 'turma' in aula:
+        return aula['turma']
+    elif hasattr(aula, 'turma'):
+        return aula.turma
     return None
 
 def obter_disciplina_aula(aula):
     """Obtém a disciplina de uma aula de forma segura"""
-    if hasattr(aula, 'disciplina'):
+    if isinstance(aula, Aula):
         return aula.disciplina
-    elif isinstance(aula, dict):
-        return aula.get('disciplina')
+    elif isinstance(aula, dict) and 'disciplina' in aula:
+        return aula['disciplina']
+    elif hasattr(aula, 'disciplina'):
+        return aula.disciplina
     return None
 
 def obter_professor_aula(aula):
     """Obtém o professor de uma aula de forma segura"""
-    if hasattr(aula, 'professor'):
+    if isinstance(aula, Aula):
         return aula.professor
-    elif isinstance(aula, dict):
-        return aula.get('professor')
+    elif isinstance(aula, dict) and 'professor' in aula:
+        return aula['professor']
+    elif hasattr(aula, 'professor'):
+        return aula.professor
     return None
 
 def obter_dia_aula(aula):
     """Obtém o dia de uma aula de forma segura"""
-    if hasattr(aula, 'dia'):
+    if isinstance(aula, Aula):
         return aula.dia
-    elif isinstance(aula, dict):
-        return aula.get('dia')
+    elif isinstance(aula, dict) and 'dia' in aula:
+        return aula['dia']
+    elif hasattr(aula, 'dia'):
+        return aula.dia
     return None
 
 def obter_horario_aula(aula):
     """Obtém o horário de uma aula de forma segura"""
-    if hasattr(aula, 'horario'):
+    if isinstance(aula, Aula):
         return aula.horario
-    elif isinstance(aula, dict):
-        return aula.get('horario')
+    elif isinstance(aula, dict) and 'horario' in aula:
+        return aula['horario']
+    elif hasattr(aula, 'horario'):
+        return aula.horario
     return None
 
 def obter_segmento_aula(aula):
     """Obtém o segmento de uma aula de forma segura"""
-    if hasattr(aula, 'segmento'):
+    if isinstance(aula, Aula):
+        return aula.segmento if hasattr(aula, 'segmento') else None
+    elif isinstance(aula, dict) and 'segmento' in aula:
+        return aula['segmento']
+    elif hasattr(aula, 'segmento'):
         return aula.segmento
-    elif isinstance(aula, dict):
-        return aula.get('segmento')
     return None
 
 # ============================================
-# SISTEMA DE DIAGNÓSTICO DE GRADE
+# SISTEMA DE DIAGNÓSTICO DE GRADE (CORRIGIDO)
 # ============================================
 
 def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
@@ -237,9 +248,21 @@ def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
     if not aulas_alocadas:
         return diagnostico
     
+    # Converter todas as aulas para formato consistente
+    aulas_consistente = []
+    for aula in aulas_alocadas:
+        aulas_consistente.append({
+            'turma': obter_turma_aula(aula),
+            'disciplina': obter_disciplina_aula(aula),
+            'professor': obter_professor_aula(aula),
+            'dia': obter_dia_aula(aula),
+            'horario': obter_horario_aula(aula),
+            'segmento': obter_segmento_aula(aula) or obter_segmento_turma(obter_turma_aula(aula))
+        })
+    
     # 1. ANÁLISE POR TURMA
     total_aulas_necessarias = 0
-    total_aulas_alocadas = len(aulas_alocadas)
+    total_aulas_alocadas = len(aulas_consistente)
     
     for turma in turmas:
         turma_nome = turma.nome
@@ -258,7 +281,7 @@ def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
         total_aulas_necessarias += aulas_necessarias_turma
         
         # Contar aulas alocadas para esta turma
-        aulas_turma = [a for a in aulas_alocadas if obter_turma_aula(a) == turma_nome]
+        aulas_turma = [a for a in aulas_consistente if a['turma'] == turma_nome]
         aulas_alocadas_turma = len(aulas_turma)
         
         # Calcular completude da turma
@@ -267,7 +290,7 @@ def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
         # Detalhar por disciplina
         faltas_disciplinas = []
         for disc in disciplinas_da_turma:
-            aulas_disc = len([a for a in aulas_turma if obter_disciplina_aula(a) == disc.nome])
+            aulas_disc = len([a for a in aulas_turma if a['disciplina'] == disc.nome])
             if aulas_disc < disc.carga_semanal:
                 faltas = disc.carga_semanal - aulas_disc
                 faltas_disciplinas.append(f"{disc.nome} ({aulas_disc}/{disc.carga_semanal})")
@@ -292,13 +315,13 @@ def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
     # 3. ANÁLISE DE PROFESSORES
     for professor in professores:
         # Contar aulas do professor
-        aulas_professor = len([a for a in aulas_alocadas if obter_professor_aula(a) == professor.nome])
+        aulas_professor = len([a for a in aulas_consistente if a['professor'] == professor.nome])
         
         # Verificar disponibilidade
         dias_disponiveis = len(professor.disponibilidade) if hasattr(professor, 'disponibilidade') else 0
         horarios_indisponiveis = len(professor.horarios_indisponiveis) if hasattr(professor, 'horarios_indisponiveis') else 0
         
-        # Calcular capacidade máxima (5 dias × 7 períodos = 35)
+        # Calcular capacidade máxima
         capacidade_maxima = dias_disponiveis * 7 - horarios_indisponiveis
         
         if capacidade_maxima <= aulas_professor:
@@ -311,7 +334,6 @@ def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
             })
     
     # 4. IDENTIFICAR PROBLEMAS PRINCIPAIS
-    # Problema 1: Professores insuficientes para disciplinas
     for turma_nome, info in diagnostico['detalhes_por_turma'].items():
         if info['faltas_disciplinas']:
             turma_obj = next((t for t in turmas if t.nome == turma_nome), None)
@@ -334,21 +356,20 @@ def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
                     diagnostico['problemas'].append(f"⚠️ **{turma_nome}**: Apenas 1 professor para **{disc_nome}** ({professores_disc[0]})")
                     diagnostico['sugestoes'].append(f"👉 Adicione um segundo professor para **{disc_nome}** ou aumente a disponibilidade de **{professores_disc[0]}**")
     
-    # Problema 2: Conflitos de horário
-    # Verificar se há múltiplas aulas no mesmo horário para mesma turma
+    # 5. Conflitos de horário
     horarios_turma = {}
-    for aula in aulas_alocadas:
-        chave = f"{obter_turma_aula(aula)}|{obter_dia_aula(aula)}|{obter_horario_aula(aula)}"
+    for aula in aulas_consistente:
+        chave = f"{aula['turma']}|{aula['dia']}|{aula['horario']}"
         if chave not in horarios_turma:
             horarios_turma[chave] = []
         horarios_turma[chave].append(aula)
     
     for chave, aulas_conflito in horarios_turma.items():
         if len(aulas_conflito) > 1:
-            turma = obter_turma_aula(aulas_conflito[0])
-            dia = obter_dia_aula(aulas_conflito[0])
-            horario = obter_horario_aula(aulas_conflito[0])
-            disciplinas = [obter_disciplina_aula(a) for a in aulas_conflito]
+            turma = aulas_conflito[0]['turma']
+            dia = aulas_conflito[0]['dia']
+            horario = aulas_conflito[0]['horario']
+            disciplinas = [a['disciplina'] for a in aulas_conflito]
             diagnostico['horarios_conflitantes'].append({
                 'turma': turma,
                 'dia': dia,
@@ -356,7 +377,7 @@ def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
                 'disciplinas': disciplinas
             })
     
-    # 5. DEFINIR STATUS FINAL
+    # 6. DEFINIR STATUS FINAL
     if diagnostico['completude'] == 100:
         diagnostico['status'] = '✅ COMPLETA'
     elif diagnostico['completude'] >= 90:
@@ -366,9 +387,9 @@ def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
     else:
         diagnostico['status'] = '❌ INCOMPLETA'
     
-    # 6. SUGESTÕES AUTOMÁTICAS
+    # 7. SUGESTÕES AUTOMÁTICAS
     if diagnostico['professores_saturados']:
-        for prof in diagnostico['professores_saturados'][:3]:  # Top 3 mais saturados
+        for prof in diagnostico['professores_saturados'][:3]:
             diagnostico['sugestoes'].append(f"👉 Professor **{prof['nome']}** está com {prof['aulas']}/{prof['capacidade']} aulas. Aumente disponibilidade ou reduza carga.")
     
     if total_aulas_necessarias > total_aulas_alocadas:
@@ -378,217 +399,419 @@ def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
     return diagnostico
 
 # ============================================
-# ALGORITMO FORÇA-BRUTA para Completar Grades
+# ALGORITMO AVANÇADO PARA COMPLETAR GRADES
 # ============================================
 
-class CompletadorDeGrade:
-    """Algoritmo força-bruta para tentar completar grades incompletas"""
+class CompletadorDeGradeAvancado:
+    """Algoritmo avançado para completar grades incompletas"""
     
     def __init__(self, turmas, professores, disciplinas):
         self.turmas = turmas
         self.professores = professores
         self.disciplinas = disciplinas
         self.dias = ['segunda', 'terca', 'quarta', 'quinta', 'sexta']
-        self.max_tentativas = 1000
-        
+        self.max_iteracoes = 500
+    
     def completar_grade(self, aulas_atuais):
         """Tenta completar uma grade existente"""
-        aulas = aulas_atuais.copy() if aulas_atuais else []
+        if not aulas_atuais:
+            return self._gerar_grade_do_zero()
         
-        # Calcular o que falta
-        faltas = self._calcular_faltas(aulas)
+        # Converter para formato consistente
+        aulas = self._converter_para_dict(aulas_atuais)
         
-        if not faltas:
-            return aulas  # Já está completa
+        # Analisar estado atual
+        analise = self._analisar_estado(aulas)
         
-        # Tentativa 1: Algoritmo inteligente
-        aulas = self._tentativa_inteligente(aulas, faltas)
+        # Se já está completa, retornar
+        if analise['completude'] == 100:
+            return self._converter_para_aulas(aulas)
         
-        # Verificar se completou
-        faltas_pos_tentativa = self._calcular_faltas(aulas)
-        if not faltas_pos_tentativa:
-            return aulas
+        # Tentar múltiplas estratégias
+        estrategias = [
+            self._estrategia_preencher_buracos,
+            self._estrategia_rebalancear_professores,
+            self._estrategia_permutar_horarios,
+            self._estrategia_busca_local
+        ]
         
-        # Tentativa 2: Algoritmo força-bruta (limitado)
-        aulas = self._tentativa_forca_bruta(aulas, faltas_pos_tentativa)
+        for estrategia in estrategias:
+            st.info(f"Tentando estratégia: {estrategia.__name__}")
+            nova_aulas = estrategia(aulas, analise)
+            nova_analise = self._analisar_estado(nova_aulas)
+            
+            if nova_analise['completude'] > analise['completude']:
+                aulas = nova_aulas
+                analise = nova_analise
+                
+                if analise['completude'] == 100:
+                    break
         
-        return aulas
+        # Converter de volta para objetos Aula
+        return self._converter_para_aulas(aulas)
     
-    def _calcular_faltas(self, aulas):
-        """Calcula exatamente quais aulas faltam"""
-        faltas = []
+    def _converter_para_dict(self, aulas):
+        """Converte aulas para formato dicionário"""
+        aulas_dict = []
+        for aula in aulas:
+            aulas_dict.append({
+                'turma': obter_turma_aula(aula),
+                'disciplina': obter_disciplina_aula(aula),
+                'professor': obter_professor_aula(aula),
+                'dia': obter_dia_aula(aula),
+                'horario': obter_horario_aula(aula),
+                'segmento': obter_segmento_aula(aula) or obter_segmento_turma(obter_turma_aula(aula))
+            })
+        return aulas_dict
+    
+    def _converter_para_aulas(self, aulas_dict):
+        """Converte dicionários para objetos Aula"""
+        aulas_objetos = []
+        for aula in aulas_dict:
+            aulas_objetos.append(Aula(
+                turma=aula['turma'],
+                disciplina=aula['disciplina'],
+                professor=aula['professor'],
+                dia=aula['dia'],
+                horario=aula['horario'],
+                segmento=aula['segmento']
+            ))
+        return aulas_objetos
+    
+    def _analisar_estado(self, aulas):
+        """Analisa o estado atual da grade"""
+        analise = {
+            'completude': 0,
+            'total_necessario': 0,
+            'total_alocado': len(aulas),
+            'faltas_por_turma': {},
+            'horarios_livres_por_turma': {},
+            'professores_carga': {}
+        }
         
+        # Calcular total necessário
         for turma in self.turmas:
             turma_nome = turma.nome
             grupo_turma = turma.grupo
             
-            # Contar aulas alocadas por disciplina para esta turma
-            contagem_atual = {}
-            for aula in aulas:
-                if obter_turma_aula(aula) == turma_nome:
-                    disc = obter_disciplina_aula(aula)
-                    if disc:
-                        contagem_atual[disc] = contagem_atual.get(disc, 0) + 1
-            
-            # Verificar cada disciplina que a turma deve ter
+            aulas_necessarias = 0
             for disc in self.disciplinas:
                 if turma_nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
-                    alocadas = contagem_atual.get(disc.nome, 0)
-                    if alocadas < disc.carga_semanal:
-                        for _ in range(disc.carga_semanal - alocadas):
-                            faltas.append({
-                                'turma': turma_nome,
-                                'disciplina': disc.nome,
-                                'grupo': grupo_turma,
-                                'necessarias': disc.carga_semanal,
-                                'alocadas': alocadas
-                            })
+                    aulas_necessarias += disc.carga_semanal
+            
+            analise['total_necessario'] += aulas_necessarias
+            
+            # Contar aulas alocadas
+            aulas_turma = [a for a in aulas if a['turma'] == turma_nome]
+            
+            # Calcular horários livres
+            horarios_turma = obter_horarios_turma(turma_nome)
+            horarios_ocupados = set()
+            for aula in aulas_turma:
+                horarios_ocupados.add((aula['dia'], aula['horario']))
+            
+            horarios_livres = []
+            for dia in self.dias:
+                for horario in horarios_turma:
+                    if (dia, horario) not in horarios_ocupados:
+                        horarios_livres.append((dia, horario))
+            
+            analise['horarios_livres_por_turma'][turma_nome] = horarios_livres
+            
+            # Calcular faltas
+            faltas = []
+            for disc in self.disciplinas:
+                if turma_nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
+                    aulas_disc = len([a for a in aulas_turma if a['disciplina'] == disc.nome])
+                    if aulas_disc < disc.carga_semanal:
+                        faltas.append({
+                            'disciplina': disc.nome,
+                            'faltam': disc.carga_semanal - aulas_disc,
+                            'prioridade': self._calcular_prioridade(disc.nome, grupo_turma)
+                        })
+            
+            analise['faltas_por_turma'][turma_nome] = faltas
         
-        return faltas
+        # Calcular completude
+        if analise['total_necessario'] > 0:
+            analise['completude'] = (analise['total_alocado'] / analise['total_necessario']) * 100
+        
+        # Calcular carga dos professores
+        for professor in self.professores:
+            aulas_prof = len([a for a in aulas if a['professor'] == professor.nome])
+            analise['professores_carga'][professor.nome] = aulas_prof
+        
+        return analise
     
-    def _tentativa_inteligente(self, aulas, faltas):
-        """Tentativa inteligente de alocação"""
-        # Ordenar faltas por dificuldade (disciplinas com menos professores primeiro)
-        faltas_ordenadas = []
-        for falta in faltas:
-            # Contar professores disponíveis para esta disciplina e grupo
-            professores_disponiveis = 0
-            for prof in self.professores:
-                if falta['disciplina'] in prof.disciplinas:
-                    if prof.grupo in [falta['grupo'], "AMBOS"]:
-                        professores_disponiveis += 1
-            
-            faltas_ordenadas.append({
-                **falta,
-                'dificuldade': 10 - professores_disponiveis,  # Quanto maior, mais difícil
-                'professores_disponiveis': professores_disponiveis
-            })
+    def _calcular_prioridade(self, disciplina, grupo):
+        """Calcula prioridade para alocação"""
+        # Contar professores disponíveis
+        professores_disponiveis = 0
+        for prof in self.professores:
+            if disciplina in prof.disciplinas:
+                if prof.grupo in [grupo, "AMBOS"]:
+                    professores_disponiveis += 1
         
-        # Ordenar do mais difícil para o mais fácil
-        faltas_ordenadas.sort(key=lambda x: x['dificuldade'], reverse=True)
-        
-        # Tentar alocar cada falta
-        for falta in faltas_ordenadas:
-            if falta['professores_disponiveis'] == 0:
-                continue  # Não tem professor, pular
-            
-            # Encontrar professores candidatos
-            professores_candidatos = []
-            for prof in self.professores:
-                if falta['disciplina'] in prof.disciplinas:
-                    if prof.grupo in [falta['grupo'], "AMBOS"]:
-                        professores_candidatos.append(prof)
-            
-            # Tentar cada professor
-            for professor in professores_candidatos:
-                # Tentar cada dia disponível
-                for dia in professor.disponibilidade:
-                    # Tentar cada período
-                    segmento = obter_segmento_turma(falta['turma'])
-                    periodos = obter_horarios_turma(falta['turma'])
-                    
-                    for periodo in periodos:
-                        # Verificar se já tentou muito
-                        if len(aulas) > 500:  # Limite de segurança
-                            return aulas
-                        
-                        # Verificar restrições
-                        if not self._pode_alocar(aulas, falta['turma'], professor.nome, dia, periodo):
-                            continue
-                        
-                        # Alocar!
-                        from models import Aula
-                        nova_aula = Aula(
-                            turma=falta['turma'],
-                            disciplina=falta['disciplina'],
-                            professor=professor.nome,
-                            dia=dia,
-                            horario=periodo,
-                            segmento=segmento
-                        )
-                        aulas.append(nova_aula)
-                        
-                        # Parar de tentar para esta falta
-                        break
-                    else:
-                        continue
-                    break
-                else:
-                    continue
-                break
-        
-        return aulas
+        # Quanto menos professores, maior a prioridade
+        return 10 - professores_disponiveis
     
-    def _tentativa_forca_bruta(self, aulas, faltas, max_iteracoes=100):
-        """Tentativa força-bruta limitada"""
-        import random
+    def _estrategia_preencher_buracos(self, aulas, analise):
+        """Preenche buracos óbvios na grade"""
+        nova_grade = aulas.copy()
         
-        for _ in range(max_iteracoes):
-            if not faltas:
-                break
+        # Ordenar turmas por número de faltas
+        turmas_ordenadas = []
+        for turma_nome, faltas in analise['faltas_por_turma'].items():
+            if faltas:
+                turmas_ordenadas.append((turma_nome, len(faltas)))
+        
+        turmas_ordenadas.sort(key=lambda x: x[1], reverse=True)
+        
+        for turma_nome, _ in turmas_ordenadas:
+            faltas = analise['faltas_por_turma'][turma_nome]
+            horarios_livres = analise['horarios_livres_por_turma'].get(turma_nome, [])
             
-            # Pegar uma falta aleatória
-            falta = random.choice(faltas)
+            # Ordenar faltas por prioridade
+            faltas_ordenadas = sorted(faltas, key=lambda x: x['prioridade'])
             
-            # Encontrar professores candidatos
-            professores_candidatos = []
-            for prof in self.professores:
-                if falta['disciplina'] in prof.disciplinas:
-                    if prof.grupo in [falta['grupo'], "AMBOS"]:
-                        professores_candidatos.append(prof)
-            
-            if not professores_candidatos:
-                continue
-            
-            # Escolher professor aleatório
-            professor = random.choice(professores_candidatos)
-            
-            # Escolher dia aleatório da disponibilidade
-            if not professor.disponibilidade:
-                continue
-            dia = random.choice(list(professor.disponibilidade))
-            
-            # Escolher período aleatório
-            segmento = obter_segmento_turma(falta['turma'])
-            periodos = obter_horarios_turma(falta['turma'])
-            periodo = random.choice(periodos)
-            
-            # Verificar se pode alocar
-            if self._pode_alocar(aulas, falta['turma'], professor.nome, dia, periodo):
-                from models import Aula
-                nova_aula = Aula(
-                    turma=falta['turma'],
-                    disciplina=falta['disciplina'],
-                    professor=professor.nome,
-                    dia=dia,
-                    horario=periodo,
-                    segmento=segmento
-                )
-                aulas.append(nova_aula)
+            for falta in faltas_ordenadas:
+                disciplina = falta['disciplina']
                 
-                # Recalcular faltas
-                faltas = self._calcular_faltas(aulas)
+                # Encontrar professores
+                professores_candidatos = []
+                turma_obj = next((t for t in self.turmas if t.nome == turma_nome), None)
+                grupo_turma = turma_obj.grupo if turma_obj else 'A'
+                
+                for prof in self.professores:
+                    if disciplina in prof.disciplinas:
+                        if prof.grupo in [grupo_turma, "AMBOS"]:
+                            professores_candidatos.append(prof)
+                
+                # Ordenar professores por carga
+                professores_candidatos.sort(key=lambda p: analise['professores_carga'].get(p.nome, 0))
+                
+                # Tentar cada horário livre
+                for dia, horario in horarios_livres:
+                    # Verificar se já alocou todas as faltas desta disciplina
+                    if falta['faltam'] <= 0:
+                        break
+                    
+                    # Tentar cada professor
+                    for professor in professores_candidatos:
+                        # Verificar disponibilidade do professor
+                        if self._professor_disponivel(nova_grade, professor.nome, dia, horario):
+                            # Verificar se não está bloqueado
+                            if f"{dia}_{horario}" in professor.horarios_indisponiveis:
+                                continue
+                            
+                            # Alocar aula
+                            nova_grade.append({
+                                'turma': turma_nome,
+                                'disciplina': disciplina,
+                                'professor': professor.nome,
+                                'dia': dia,
+                                'horario': horario,
+                                'segmento': obter_segmento_turma(turma_nome)
+                            })
+                            
+                            # Atualizar contadores
+                            falta['faltam'] -= 1
+                            horarios_livres.remove((dia, horario))
+                            analise['professores_carga'][professor.nome] = analise['professores_carga'].get(professor.nome, 0) + 1
+                            break
+                    
+                    if falta['faltam'] <= 0:
+                        break
         
-        return aulas
+        return nova_grade
     
-    def _pode_alocar(self, aulas, turma, professor, dia, horario):
-        """Verifica se uma aula pode ser alocada sem conflitos"""
-        # Verificar se turma já tem aula neste horário
-        for aula in aulas:
-            if obter_turma_aula(aula) == turma and obter_dia_aula(aula) == dia and obter_horario_aula(aula) == horario:
-                return False
+    def _estrategia_rebalancear_professores(self, aulas, analise):
+        """Rebalanceia carga entre professores"""
+        nova_grade = aulas.copy()
         
-        # Verificar se professor já tem aula neste horário
-        for aula in aulas:
-            if obter_professor_aula(aula) == professor and obter_dia_aula(aula) == dia and obter_horario_aula(aula) == horario:
-                return False
+        # Encontrar professores sobrecarregados
+        professores_sobrecarregados = []
+        for nome, carga in analise['professores_carga'].items():
+            professor_obj = next((p for p in self.professores if p.nome == nome), None)
+            if professor_obj:
+                dias_disponiveis = len(professor_obj.disponibilidade)
+                capacidade_maxima = dias_disponiveis * 7 - len(professor_obj.horarios_indisponiveis)
+                
+                if carga > capacidade_maxima * 0.8:  # Mais de 80% da capacidade
+                    professores_sobrecarregados.append((nome, carga, capacidade_maxima))
         
-        # Verificar se professor tem este horário bloqueado
-        prof_obj = next((p for p in self.professores if p.nome == professor), None)
-        if prof_obj and f"{dia}_{horario}" in prof_obj.horarios_indisponiveis:
-            return False
+        # Ordenar por sobrecarga
+        professores_sobrecarregados.sort(key=lambda x: x[1] / x[2] if x[2] > 0 else 0, reverse=True)
         
+        for prof_nome, carga, capacidade in professores_sobrecarregados[:3]:  # Apenas os 3 mais sobrecarregados
+            # Encontrar aulas deste professor
+            aulas_prof = [a for a in nova_grade if a['professor'] == prof_nome]
+            
+            for aula in aulas_prof:
+                disciplina = aula['disciplina']
+                turma_nome = aula['turma']
+                
+                # Encontrar professores alternativos
+                professores_alternativos = []
+                turma_obj = next((t for t in self.turmas if t.nome == turma_nome), None)
+                grupo_turma = turma_obj.grupo if turma_obj else 'A'
+                
+                for prof in self.professores:
+                    if prof.nome != prof_nome and disciplina in prof.disciplinas:
+                        if prof.grupo in [grupo_turma, "AMBOS"]:
+                            # Verificar disponibilidade no mesmo horário
+                            if self._professor_disponivel(nova_grade, prof.nome, aula['dia'], aula['horario']):
+                                if f"{aula['dia']}_{aula['horario']}" not in prof.horarios_indisponiveis:
+                                    professores_alternativos.append(prof)
+                
+                # Se encontrou alternativo, transferir
+                if professores_alternativos:
+                    # Escolher o menos carregado
+                    professores_alternativos.sort(key=lambda p: analise['professores_carga'].get(p.nome, 0))
+                    novo_professor = professores_alternativos[0]
+                    
+                    # Atualizar aula
+                    for i, a in enumerate(nova_grade):
+                        if (a['turma'] == turma_nome and a['disciplina'] == disciplina and 
+                            a['dia'] == aula['dia'] and a['horario'] == aula['horario']):
+                            nova_grade[i]['professor'] = novo_professor.nome
+                            break
+                    
+                    # Atualizar cargas
+                    analise['professores_carga'][prof_nome] -= 1
+                    analise['professores_carga'][novo_professor.nome] = analise['professores_carga'].get(novo_professor.nome, 0) + 1
+                    break
+        
+        return nova_grade
+    
+    def _estrategia_permutar_horarios(self, aulas, analise):
+        """Permuta horários para criar espaços"""
+        nova_grade = aulas.copy()
+        
+        # Para cada turma com faltas
+        for turma_nome, faltas in analise['faltas_por_turma'].items():
+            if not faltas:
+                continue
+            
+            # Encontrar aulas desta turma
+            aulas_turma = [a for a in nova_grade if a['turma'] == turma_nome]
+            
+            # Tentar permutar com outras turmas
+            for aula in aulas_turma:
+                # Encontrar outra aula em horário diferente
+                for outra_aula in nova_grade:
+                    if outra_aula['turma'] != turma_nome:
+                        # Tentar trocar horários
+                        if self._permutacao_valida(nova_grade, aula, outra_aula):
+                            # Realizar troca
+                            dia_temp = aula['dia']
+                            horario_temp = aula['horario']
+                            
+                            aula['dia'] = outra_aula['dia']
+                            aula['horario'] = outra_aula['horario']
+                            
+                            outra_aula['dia'] = dia_temp
+                            outra_aula['horario'] = horario_temp
+        
+        return nova_grade
+    
+    def _estrategia_busca_local(self, aulas, analise):
+        """Busca local por melhorias"""
+        melhor_grade = aulas.copy()
+        melhor_completude = analise['completude']
+        
+        for _ in range(50):  # 50 iterações
+            grade_tentativa = melhor_grade.copy()
+            
+            # Aplicar operação aleatória
+            operacao = random.choice(['mover', 'trocar', 'realocar'])
+            
+            if operacao == 'mover' and len(grade_tentativa) > 0:
+                # Mover uma aula para horário livre
+                aula_idx = random.randrange(len(grade_tentativa))
+                aula = grade_tentativa[aula_idx]
+                
+                turma_nome = aula['turma']
+                horarios_livres = analise['horarios_livres_por_turma'].get(turma_nome, [])
+                
+                if horarios_livres:
+                    novo_dia, novo_horario = random.choice(horarios_livres)
+                    
+                    # Verificar se professor está disponível
+                    if self._professor_disponivel(grade_tentativa, aula['professor'], novo_dia, novo_horario):
+                        grade_tentativa[aula_idx]['dia'] = novo_dia
+                        grade_tentativa[aula_idx]['horario'] = novo_horario
+            
+            elif operacao == 'trocar' and len(grade_tentativa) >= 2:
+                # Trocar duas aulas de lugar
+                idx1, idx2 = random.sample(range(len(grade_tentativa)), 2)
+                aula1 = grade_tentativa[idx1]
+                aula2 = grade_tentativa[idx2]
+                
+                # Verificar se troca é válida
+                if (self._professor_disponivel(grade_tentativa, aula1['professor'], aula2['dia'], aula2['horario']) and
+                    self._professor_disponivel(grade_tentativa, aula2['professor'], aula1['dia'], aula1['horario'])):
+                    
+                    # Trocar horários
+                    dia_temp = aula1['dia']
+                    horario_temp = aula1['horario']
+                    
+                    grade_tentativa[idx1]['dia'] = aula2['dia']
+                    grade_tentativa[idx1]['horario'] = aula2['horario']
+                    
+                    grade_tentativa[idx2]['dia'] = dia_temp
+                    grade_tentativa[idx2]['horario'] = horario_temp
+            
+            # Avaliar nova grade
+            nova_analise = self._analisar_estado(grade_tentativa)
+            
+            if nova_analise['completude'] > melhor_completude:
+                melhor_grade = grade_tentativa
+                melhor_completude = nova_analise['completude']
+        
+        return melhor_grade
+    
+    def _professor_disponivel(self, grade, professor_nome, dia, horario):
+        """Verifica se professor está disponível em determinado horário"""
+        for aula in grade:
+            if aula['professor'] == professor_nome:
+                if aula['dia'] == dia and aula['horario'] == horario:
+                    return False
         return True
+    
+    def _permutacao_valida(self, grade, aula1, aula2):
+        """Verifica se permutação entre duas aulas é válida"""
+        # Verificar disponibilidade dos professores nos novos horários
+        prof1_livre = self._professor_disponivel(grade, aula1['professor'], aula2['dia'], aula2['horario'])
+        prof2_livre = self._professor_disponivel(grade, aula2['professor'], aula1['dia'], aula1['horario'])
+        
+        # Verificar se turmas estão livres nos novos horários
+        turma1_livre = True
+        turma2_livre = True
+        
+        for aula in grade:
+            if aula['turma'] == aula1['turma']:
+                if aula['dia'] == aula2['dia'] and aula['horario'] == aula2['horario']:
+                    turma1_livre = False
+            
+            if aula['turma'] == aula2['turma']:
+                if aula['dia'] == aula1['dia'] and aula['horario'] == aula1['horario']:
+                    turma2_livre = False
+        
+        return prof1_livre and prof2_livre and turma1_livre and turma2_livre
+    
+    def _gerar_grade_do_zero(self):
+        """Gera uma grade completa do zero"""
+        from simple_scheduler import SimpleGradeHoraria
+        
+        simple_grade = SimpleGradeHoraria(
+            turmas=self.turmas,
+            professores=self.professores,
+            disciplinas=self.disciplinas,
+            salas=[]
+        )
+        
+        return simple_grade.gerar_grade()
 
 # ============================================
 # FUNÇÕES ADICIONAIS
@@ -599,30 +822,35 @@ def salvar_grade_como(nome, aulas, config):
     if not hasattr(st.session_state, 'grades_salvas'):
         st.session_state.grades_salvas = {}
     
-    # Converter para dicionários se for objetos
+    # Converter para dicionários
     aulas_dict = []
     for aula in aulas:
-        if hasattr(aula, '__dict__'):
-            aulas_dict.append(aula.__dict__)
+        if isinstance(aula, Aula):
+            aulas_dict.append({
+                'turma': aula.turma,
+                'disciplina': aula.disciplina,
+                'professor': aula.professor,
+                'dia': aula.dia,
+                'horario': aula.horario,
+                'segmento': aula.segmento if hasattr(aula, 'segmento') else obter_segmento_turma(aula.turma)
+            })
         elif isinstance(aula, dict):
             aulas_dict.append(aula)
         else:
-            # Tentar extrair atributos
-            aula_dict = {
+            aulas_dict.append({
                 'turma': obter_turma_aula(aula),
                 'disciplina': obter_disciplina_aula(aula),
                 'professor': obter_professor_aula(aula),
                 'dia': obter_dia_aula(aula),
                 'horario': obter_horario_aula(aula),
                 'segmento': obter_segmento_aula(aula)
-            }
-            aulas_dict.append(aula_dict)
+            })
     
     st.session_state.grades_salvas[nome] = {
         'aulas': aulas_dict,
         'config': config,
         'data': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'total_aulas': len(aulas)
+        'total_aulas': len(aulas_dict)
     }
     
     return True
@@ -630,13 +858,11 @@ def salvar_grade_como(nome, aulas, config):
 # ============================================
 # MENU DE ABAS
 # ============================================
-
 abas = st.tabs(["🏠 Início", "📚 Disciplinas", "👩‍🏫 Professores", "🎒 Turmas", "🏫 Salas", "🗓️ Gerar Grade", "👨‍🏫 Grade por Professor", "🔧 Diagnóstico"])
 
 # ============================================
 # ABA INÍCIO
 # ============================================
-
 with abas[0]:
     st.header("Dashboard")
     
@@ -650,7 +876,6 @@ with abas[0]:
     with col4:
         st.metric("Salas", len(st.session_state.salas))
     
-    # Estatísticas por segmento
     st.subheader("📊 Estatísticas por Segmento")
     
     turmas_efii = [t for t in st.session_state.turmas if obter_segmento_turma(t.nome) == "EF_II"]
@@ -669,7 +894,6 @@ with abas[0]:
         st.write(f"Horário: 07:00 - 13:10")
         st.write(f"Aulas: 7 por dia + intervalo")
     
-    # Verificação de carga horária
     st.subheader("📈 Verificação de Carga de Aulas")
     
     for turma in st.session_state.turmas:
@@ -678,7 +902,6 @@ with abas[0]:
         grupo_turma = obter_grupo_seguro(turma)
         segmento = obter_segmento_turma(turma.nome)
         
-        # Contar disciplinas vinculadas
         for disc in st.session_state.disciplinas:
             if turma.nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
                 carga_total += disc.carga_semanal
@@ -706,7 +929,6 @@ with abas[0]:
 # ============================================
 # ABA DISCIPLINAS
 # ============================================
-
 with abas[1]:
     st.header("📚 Disciplinas")
     
@@ -814,7 +1036,6 @@ with abas[1]:
 # ============================================
 # ABA PROFESSORES
 # ============================================
-
 with abas[2]:
     st.header("👩‍🏫 Professores")
     
@@ -857,7 +1078,7 @@ with abas[2]:
                         )
                         st.session_state.professores.append(novo_professor)
                         if salvar_tudo():
-                            st.success(f"✅ Professor '{nome}' adicionado!")
+                            st.success(f"✅ Professor '{nome}' adicionada!")
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ Erro ao adicionar professor: {str(e)}")
@@ -871,7 +1092,7 @@ with abas[2]:
         professores_exibir = [p for p in st.session_state.professores if obter_grupo_seguro(p) == grupo_filtro]
     
     if not professores_exibir:
-        st.info("📝 Nenhum professor cadastrado.")
+        st.info("📝 Nenhum professor cadastrada.")
     
     for prof in professores_exibir:
         with st.expander(f"👨‍🏫 {prof.nome} [{obter_grupo_seguro(prof)}]", expanded=False):
@@ -960,7 +1181,6 @@ with abas[2]:
 # ============================================
 # ABA TURMAS
 # ============================================
-
 with abas[3]:
     st.header("🎒 Turmas")
     
@@ -976,7 +1196,6 @@ with abas[3]:
                 turno = st.selectbox("Turno*", ["manha"], disabled=True)
                 grupo = st.selectbox("Grupo*", ["A", "B"])
             
-            # Determinar segmento automaticamente
             segmento = "EM" if serie and 'em' in serie.lower() else "EF_II"
             st.info(f"💡 Segmento: {segmento} - {calcular_carga_maxima(serie)}h semanais máximas")
             
@@ -1018,7 +1237,6 @@ with abas[3]:
                         key=f"grupo_turma_{turma.id}"
                     )
                 
-                # Mostrar informações da turma
                 segmento = obter_segmento_turma(turma.nome)
                 horarios = obter_horarios_turma(turma.nome)
                 st.write(f"**Segmento:** {segmento}")
@@ -1070,7 +1288,6 @@ with abas[3]:
 # ============================================
 # ABA SALAS
 # ============================================
-
 with abas[4]:
     st.header("🏫 Salas")
     
@@ -1144,9 +1361,8 @@ with abas[4]:
                             st.error(f"❌ Erro ao excluir: {str(e)}")
 
 # ============================================
-# ABA GERAR GRADE - VERSÃO FINAL CORRIGIDA
+# ABA GERAR GRADE - COM LAYOUT VISUAL RESTAURADO
 # ============================================
-
 with abas[5]:
     st.header("🗓️ Gerar Grade Horária")
     
@@ -1174,7 +1390,13 @@ with abas[5]:
     with col2:
         tipo_algoritmo = st.selectbox(
             "Algoritmo de Geração",
-            ["Algoritmo Simples (Rápido)", "Google OR-Tools (Otimizado)"]
+            ["Algoritmo Simples (Rápido)"]
+        )
+        
+        tipo_completador = st.selectbox(
+            "Algoritmo de Completude",
+            ["Completador Básico", "Completador Avançado (Recomendado)"],
+            help="O completador avançado usa múltiplas estratégias para tentar completar grades incompletas"
         )
         
         st.info("📅 **EM: 07:00-13:10 (7 períodos)**")
@@ -1182,7 +1404,6 @@ with abas[5]:
     
     st.subheader("📊 Pré-análise de Viabilidade")
     
-    # Calcular carga horária conforme seleção
     if tipo_grade == "Grade por Grupo A":
         turmas_filtradas = [t for t in st.session_state.turmas if obter_grupo_seguro(t) == "A"]
         grupo_texto = "Grupo A"
@@ -1196,7 +1417,6 @@ with abas[5]:
         turmas_filtradas = st.session_state.turmas
         grupo_texto = "Todas as Turmas"
     
-    # Filtrar disciplinas pelo grupo correto
     if tipo_grade == "Grade por Grupo A":
         disciplinas_filtradas = [d for d in st.session_state.disciplinas if obter_grupo_seguro(d) == "A"]
     elif tipo_grade == "Grade por Grupo B":
@@ -1204,7 +1424,6 @@ with abas[5]:
     else:
         disciplinas_filtradas = st.session_state.disciplinas
     
-    # Calcular total de aulas necessárias
     total_aulas = 0
     aulas_por_turma = {}
     problemas_carga = []
@@ -1226,7 +1445,6 @@ with abas[5]:
             status = "✅" if aulas_turma == carga_maxima else "⚠️" if aulas_turma <= carga_maxima else "❌"
             problemas_carga.append(f"{turma.nome} [{grupo_turma}]: {aulas_turma}h {status} {carga_maxima}h máximo")
     
-    # Capacidade com horários reais
     capacidade_total = 0
     for turma in turmas_filtradas:
         horarios_turma = obter_horarios_turma(turma.nome)
@@ -1260,7 +1478,6 @@ with abas[5]:
             else:
                 with st.spinner(f"Gerando grade para {grupo_texto}..."):
                     try:
-                        # Filtrar professores
                         if tipo_grade == "Grade por Grupo A":
                             professores_filtrados = [p for p in st.session_state.professores 
                                                    if obter_grupo_seguro(p) in ["A", "AMBOS"]]
@@ -1271,39 +1488,21 @@ with abas[5]:
                             professores_filtrados = st.session_state.professores
                         
                         # Gerar grade
-                        if tipo_algoritmo == "Google OR-Tools (Otimizado)" and ORTOOLS_DISPONIVEL:
-                            try:
-                                grade = GradeHorariaORTools(
-                                    turmas_filtradas,
-                                    professores_filtrados,
-                                    disciplinas_filtradas,
-                                    relaxar_horario_ideal=False
-                                )
-                                aulas = grade.resolver()
-                                metodo = "Google OR-Tools"
-                            except Exception as e:
-                                st.warning(f"⚠️ OR-Tools falhou: {str(e)}. Usando algoritmo simples...")
-                                simple_grade = SimpleGradeHoraria(
-                                    turmas=turmas_filtradas,
-                                    professores=professores_filtrados,
-                                    disciplinas=disciplinas_filtradas,
-                                    salas=st.session_state.salas
-                                )
-                                aulas = simple_grade.gerar_grade()
-                                metodo = "Algoritmo Simples (fallback)"
-                        else:
-                            simple_grade = SimpleGradeHoraria(
-                                turmas=turmas_filtradas,
-                                professores=professores_filtrados,
-                                disciplinas=disciplinas_filtradas,
-                                salas=st.session_state.salas
-                            )
-                            aulas = simple_grade.gerar_grade()
-                            metodo = "Algoritmo Simples"
+                        if not ALGORITMOS_DISPONIVEIS:
+                            st.error("❌ Algoritmo de geração não disponível!")
+                            st.stop()
+                        
+                        simple_grade = SimpleGradeHoraria(
+                            turmas=turmas_filtradas,
+                            professores=professores_filtrados,
+                            disciplinas=disciplinas_filtradas,
+                            salas=st.session_state.salas
+                        )
+                        aulas = simple_grade.gerar_grade()
+                        metodo = "Algoritmo Simples"
                         
                         # Filtrar por turma específica se necessário
                         if tipo_grade == "Grade por Turma Específica" and turma_selecionada:
-                            # Filtrar usando função segura
                             aulas = [a for a in aulas if obter_turma_aula(a) == turma_selecionada]
                         
                         # Salvar no estado da sessão
@@ -1339,7 +1538,22 @@ with abas[5]:
                                 with col1:
                                     if st.button("🔧 TENTAR COMPLETAR GRADE", type="primary", use_container_width=True):
                                         with st.spinner("Tentando completar a grade..."):
-                                            completador = CompletadorDeGrade(turmas_filtradas, professores_filtrados, disciplinas_filtradas)
+                                            if tipo_completador == "Completador Avançado (Recomendado)":
+                                                completador = CompletadorDeGradeAvancado(turmas_filtradas, professores_filtrados, disciplinas_filtradas)
+                                            else:
+                                                # Completador básico (versão simplificada)
+                                                class CompletadorDeGradeBasico:
+                                                    def __init__(self, turmas, professores, disciplinas):
+                                                        self.turmas = turmas
+                                                        self.professores = professores
+                                                        self.disciplinas = disciplinas
+                                                        self.dias = ['segunda', 'terca', 'quarta', 'quinta', 'sexta']
+                                                    
+                                                    def completar_grade(self, aulas):
+                                                        return aulas  # Básico: não faz nada
+                                                
+                                                completador = CompletadorDeGradeBasico(turmas_filtradas, professores_filtrados, disciplinas_filtradas)
+                                            
                                             aulas_completas = completador.completar_grade(aulas)
                                             
                                             # Verificar se melhorou
@@ -1353,7 +1567,7 @@ with abas[5]:
                                                 st.error("❌ Não foi possível melhorar a grade automaticamente.")
                                 
                                 with col2:
-                                    # Botão para salvar grade atual (mesmo incompleta)
+                                    # Botão para salvar grade atual
                                     nome_grade = st.text_input("Nome para salvar esta grade:", value=f"Grade_{grupo_texto}_{datetime.now().strftime('%H%M')}")
                                     if st.button("💾 SALVAR GRADE", type="secondary", use_container_width=True):
                                         if salvar_grade_como(nome_grade, aulas, {'tipo': tipo_grade, 'algoritmo': metodo}):
@@ -1362,12 +1576,12 @@ with abas[5]:
                             # Mostrar problemas e sugestões
                             if diagnostico['problemas']:
                                 with st.expander("📋 PROBLEMAS DETECTADOS", expanded=True):
-                                    for problema in diagnostico['problemas'][:5]:  # Mostrar até 5 problemas
+                                    for problema in diagnostico['problemas'][:5]:
                                         st.markdown(problema)
                             
                             if diagnostico['sugestoes']:
                                 with st.expander("💡 SUGESTÕES PARA COMPLETAR", expanded=True):
-                                    for sugestao in diagnostico['sugestoes'][:5]:  # Mostrar até 5 sugestões
+                                    for sugestao in diagnostico['sugestoes'][:5]:
                                         st.markdown(sugestao)
                             
                             # Detalhes por turma
@@ -1386,7 +1600,7 @@ with abas[5]:
                                         st.write(f"⚠️ **{prof['nome']}**: {prof['aulas']}/{prof['capacidade']} aulas (máximo: {prof['dias_disponiveis']} dias × 7 - {prof['horarios_bloqueados']} bloqueios)")
                         
                         # ============================================
-                        # VISUALIZAÇÃO DA GRADE HORÁRIA (CORRIGIDA)
+                        # VISUALIZAÇÃO DA GRADE HORÁRIA (COM LAYOUT VISUAL)
                         # ============================================
                         if aulas:
                             st.subheader("📅 Visualização da Grade Horária")
@@ -1414,12 +1628,14 @@ with abas[5]:
                                 # Dias da semana
                                 dias_ordenados = ["segunda", "terca", "quarta", "quinta", "sexta"]
                                 
+                                # CSS para estilizar a tabela
                                 st.markdown("""
                                 <style>
                                 .grade-table {
                                     width: 100%;
                                     border-collapse: collapse;
                                     margin: 10px 0;
+                                    font-size: 14px;
                                 }
                                 .grade-table th, .grade-table td {
                                     border: 1px solid #ddd;
@@ -1436,6 +1652,8 @@ with abas[5]:
                                     background-color: #e8f5e9;
                                     color: #2e7d32;
                                     font-size: 14px;
+                                    border-radius: 4px;
+                                    padding: 10px;
                                 }
                                 .livre-cell {
                                     background-color: #f5f5f5;
@@ -1451,29 +1669,35 @@ with abas[5]:
                                 .disciplina {
                                     font-weight: bold;
                                     font-size: 14px;
+                                    margin-bottom: 2px;
                                 }
                                 .professor {
-                                    font-size: 11px;
+                                    font-size: 12px;
                                     color: #666;
+                                    font-style: italic;
+                                }
+                                .horario-cell {
+                                    background-color: #f0f7ff;
+                                    font-weight: bold;
                                 }
                                 </style>
                                 """, unsafe_allow_html=True)
                                 
-                                # Construir tabela HTML CORRETA
+                                # Construir tabela HTML
                                 table_html = """<table class='grade-table'>
-<tr>
-<th>Horário</th>
-<th>Segunda</th>
-<th>Terça</th>
-<th>Quarta</th>
-<th>Quinta</th>
-<th>Sexta</th>
-</tr>"""
+                                <tr>
+                                <th>Horário</th>
+                                <th>Segunda</th>
+                                <th>Terça</th>
+                                <th>Quarta</th>
+                                <th>Quinta</th>
+                                <th>Sexta</th>
+                                </tr>"""
                                 
                                 # Adicionar períodos de aula
                                 for periodo in periodos:
                                     horario_real = obter_horario_real(turma_nome, periodo)
-                                    table_html += f"<tr><td><strong>{horario_real}</strong></td>"
+                                    table_html += f"<tr><td class='horario-cell'><strong>{horario_real}</strong></td>"
                                     
                                     for dia in dias_ordenados:
                                         # Procurar aula
@@ -1488,10 +1712,21 @@ with abas[5]:
                                             disciplina = str(obter_disciplina_aula(aula_encontrada)).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                                             professor = str(obter_professor_aula(aula_encontrada)).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                                             
-                                            table_html += f"""<td class='aula-cell'>
-<div class='disciplina'>{disciplina}</div>
-<div class='professor'>{professor}</div>
-</td>"""
+                                            # Encontrar cor da disciplina
+                                            cor_fundo = "#e8f5e9"  # Default
+                                            cor_fonte = "#2e7d32"  # Default
+                                            for disc in st.session_state.disciplinas:
+                                                if disc.nome == disciplina:
+                                                    if hasattr(disc, 'cor_fundo') and disc.cor_fundo:
+                                                        cor_fundo = disc.cor_fundo
+                                                    if hasattr(disc, 'cor_fonte') and disc.cor_fonte:
+                                                        cor_fonte = disc.cor_fonte
+                                                    break
+                                            
+                                            table_html += f"""<td class='aula-cell' style='background-color: {cor_fundo}; color: {cor_fonte};'>
+                                            <div class='disciplina'>{disciplina}</div>
+                                            <div class='professor'>{professor}</div>
+                                            </td>"""
                                         else:
                                             table_html += f"<td class='livre-cell'>LIVRE</td>"
                                     
@@ -1500,12 +1735,12 @@ with abas[5]:
                                     # Adicionar linha do intervalo no lugar correto
                                     if segmento == "EM" and periodo == 3:
                                         table_html += """<tr class='intervalo-row'>
-<td colspan='6'>🕛 INTERVALO: 09:30 - 09:50</td>
-</tr>"""
+                                        <td colspan='6'>🕛 INTERVALO: 09:30 - 09:50</td>
+                                        </tr>"""
                                     elif segmento == "EF_II" and periodo == 2:
                                         table_html += """<tr class='intervalo-row'>
-<td colspan='6'>🕛 INTERVALO: 09:30 - 09:50</td>
-</tr>"""
+                                        <td colspan='6'>🕛 INTERVALO: 09:30 - 09:50</td>
+                                        </tr>"""
                                 
                                 table_html += "</table>"
                                 
@@ -1561,9 +1796,8 @@ with abas[5]:
                         st.code(traceback.format_exc())
 
 # ============================================
-# ABA GRADE POR PROFESSOR - VERSÃO CORRIGIDA
+# ABA GRADE POR PROFESSOR
 # ============================================
-
 with abas[6]:
     st.header("👨‍🏫 Grade Horária por Professor")
     
@@ -1573,7 +1807,6 @@ with abas[6]:
         # Filtros
         col1, col2 = st.columns(2)
         with col1:
-            # CORREÇÃO: Usar função segura para obter professores
             options_set = set()
             for a in st.session_state.aulas:
                 prof = obter_professor_aula(a)
@@ -1588,7 +1821,7 @@ with abas[6]:
             )
         
         if professor_selecionado:
-            # Filtrar aulas do professor (usando função segura)
+            # Filtrar aulas do professor
             aulas_professor = [a for a in st.session_state.aulas if obter_professor_aula(a) == professor_selecionado]
             
             if not aulas_professor:
@@ -1618,7 +1851,6 @@ with abas[6]:
 # ============================================
 # ABA DIAGNÓSTICO
 # ============================================
-
 with abas[7]:
     st.header("🔧 DIAGNÓSTICO AVANÇADO DO SISTEMA")
     
@@ -1627,7 +1859,6 @@ with abas[7]:
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        # Total de aulas necessárias
         total_necessario = 0
         for turma in st.session_state.turmas:
             grupo_turma = obter_grupo_seguro(turma)
@@ -1637,15 +1868,13 @@ with abas[7]:
         st.metric("Aulas Necessárias", total_necessario)
     
     with col2:
-        # Capacidade total do sistema
         capacidade_total = 0
         for turma in st.session_state.turmas:
             horarios = obter_horarios_turma(turma.nome)
-            capacidade_total += len(horarios) * 5  # 5 dias na semana
+            capacidade_total += len(horarios) * 5
         st.metric("Capacidade Disponível", capacidade_total)
     
     with col3:
-        # Status
         if capacidade_total >= total_necessario:
             st.success("✅ Capacidade OK")
         else:
@@ -1656,9 +1885,8 @@ with abas[7]:
     
     professores_problema = []
     for prof in st.session_state.professores:
-        # Verificar disponibilidade mínima
         dias_disponiveis = len(prof.disponibilidade) if hasattr(prof, 'disponibilidade') else 0
-        if dias_disponiveis < 3:  # Menos de 3 dias
+        if dias_disponiveis < 3:
             professores_problema.append(f"**{prof.nome}**: Apenas {dias_disponiveis} dia(s) disponível(is)")
     
     if professores_problema:
@@ -1675,7 +1903,6 @@ with abas[7]:
     
     with col1:
         if st.button("🔄 Rebalancear Professores", use_container_width=True):
-            # Sugere realocação de disciplinas entre professores
             st.info("""
             **Sugestões de rebalanceamento:**
             
@@ -1718,7 +1945,6 @@ with abas[7]:
 # ============================================
 # SIDEBAR
 # ============================================
-
 st.sidebar.title("⚙️ Configurações")
 if st.sidebar.button("🔄 Resetar Banco de Dados"):
     try:
