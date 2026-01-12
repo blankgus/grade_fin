@@ -1,1986 +1,2298 @@
-import streamlit as st
-import pandas as pd
-import database
-from session_state import init_session_state
-from auto_save import salvar_tudo
-from models import Turma, Professor, Disciplina, Sala, DIAS_SEMANA, Aula
-import io
-import traceback
+# app.py - Business Plan Escolar com IA - VERSÃO CORRIGIDA
+from flask import Flask, render_template_string, request, jsonify, session, redirect
 from datetime import datetime
-import random
+import json
+import os
+import sqlite3
+import openai
+from typing import Dict, List, Any
 
-# ============================================
-# CONFIGURAÇÃO DE PÁGINA
-# ============================================
-st.set_page_config(page_title="Escola Timetable", layout="wide")
-st.title("🕒 Gerador Inteligente de Grade Horária")
+app = Flask(__name__)
 
-# ============================================
-# VERIFICAÇÃO DE ALGORITMOS
-# ============================================
-ALGORITMOS_DISPONIVEIS = True
-try:
-    from simple_scheduler import SimpleGradeHoraria
-except ImportError:
-    ALGORITMOS_DISPONIVEIS = False
-    
-    class SimpleGradeHoraria:
-        def __init__(self, *args, **kwargs):
-            self.turmas = []
-            self.professores = []
-            self.disciplinas = []
-            self.salas = []
-        
-        def gerar_grade(self):
-            st.error("❌ Algoritmo simples não disponível")
-            return []
+# Configuração
+app.config['SECRET_KEY'] = 'business_plan_ia_escolar_2024'
+app.config['TEMPLATES_AUTO_RELOAD'] = True
 
-# ============================================
-# INICIALIZAÇÃO
-# ============================================
-try:
-    init_session_state()
-    st.success("✅ Sistema inicializado com sucesso!")
-except Exception as e:
-    st.error(f"❌ Erro na inicialização: {str(e)}")
-    st.code(traceback.format_exc())
-    if st.button("🔄 Resetar Banco de Dados"):
-        database.resetar_banco()
-        st.rerun()
-    st.stop()
+# Configurar OpenAI (opcional)
+openai.api_key = os.environ.get('OPENAI_API_KEY', '')
 
-# ============================================
-# FUNÇÕES AUXILIARES CORRIGIDAS
-# ============================================
+# Configuração do banco de dados
+basedir = os.path.abspath(os.path.dirname(__file__))
+DATABASE = os.path.join(basedir, 'database_com_ia.db')
 
-def obter_grupo_seguro(objeto, opcoes=["A", "B", "AMBOS"]):
-    """Obtém o grupo de um objeto de forma segura"""
+# Segmentos básicos
+SEGMENTOS = {
+    'ei': {'nome': 'Educação Infantil', 'cor': '#FF6B8B', 'descricao': '0-5 anos'},
+    'ef_i': {'nome': 'Ensino Fundamental I', 'cor': '#4ECDC4', 'descricao': '6-10 anos'},
+    'ef_ii': {'nome': 'Ensino Fundamental II', 'cor': '#45B7D1', 'descricao': '11-14 anos'},
+    'em': {'nome': 'Ensino Médio', 'cor': '#FF9F1C', 'descricao': '15-17 anos'}
+}
+
+# Categorias de custos
+CATEGORIAS_CUSTOS = {
+    'investimento_inicial': ['Reforma', 'Equipamentos', 'Materiais', 'Móveis', 'Licenças'],
+    'custos_mensais_fixos': ['Aluguel', 'Condomínio', 'Água', 'Energia', 'Internet', 'Limpeza'],
+    'custos_mensais_variaveis': ['Material consumo', 'Material didático', 'Uniformes', 'Transporte'],
+    'marketing': ['Site', 'Redes sociais', 'Publicidade', 'Divulgação'],
+    'recursos_humanos': ['Salários professores', 'Coordenador', 'Secretária', 'Encargos']
+}
+
+# Benchmark do setor educativo
+BENCHMARKS = {
+    'margem_lucro_ideal': 30,
+    'roi_minimo_aceitavel': 100,
+    'payback_maximo': 36,
+    'ratio_aluno_professor': {
+        'ei': 10,
+        'ef_i': 15,
+        'ef_ii': 20,
+        'em': 25
+    },
+    'custo_professor_hora': {
+        'ei': 45,
+        'ef_i': 50,
+        'ef_ii': 55,
+        'em': 65
+    },
+    'receita_media_aluno_mes': {
+        'ei': 150,
+        'ef_i': 180,
+        'ef_ii': 200,
+        'em': 250
+    }
+}
+
+def init_db():
+    """Inicializa o banco de dados"""
     try:
-        if hasattr(objeto, 'grupo'):
-            grupo = objeto.grupo
-            if grupo in opcoes:
-                return grupo
-        return "A"
-    except:
-        return "A"
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS simulacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT,
+            data_criacao TEXT,
+            data_atualizacao TEXT,
+            total_alunos INTEGER,
+            total_participantes INTEGER,
+            investimento_total REAL,
+            custo_mensal_total REAL,
+            receita_mensal_total REAL,
+            lucro_mensal_total REAL,
+            payback_meses REAL,
+            roi_percentual REAL,
+            margem_lucro REAL,
+            dados_completos TEXT,
+            analise_ia TEXT
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS atividades_simulacao (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            simulacao_id INTEGER,
+            segmento TEXT,
+            nome_atividade TEXT,
+            custo_hora_professor REAL,
+            horas_semanais REAL,
+            semanas_mes INTEGER DEFAULT 4,
+            alunos INTEGER,
+            nao_alunos INTEGER,
+            receita_aluno REAL,
+            receita_nao_aluno REAL,
+            custo_material_mensal REAL,
+            FOREIGN KEY (simulacao_id) REFERENCES simulacoes (id) ON DELETE CASCADE
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        print("✅ Banco de dados com IA inicializado!")
+        return True
+    except Exception as e:
+        print(f"❌ Erro: {e}")
+        return False
 
-def obter_segmento_turma(turma_nome):
-    """Determina o segmento da turma baseado no nome"""
-    if not turma_nome:
-        return "EF_II"
+# Inicializar banco de dados
+init_db()
+
+def get_base_html(title="Business Plan com IA", content=""):
+    """Retorna o HTML base"""
+    return f'''<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {{
+            --ei-color: #FF6B8B;
+            --ef-i-color: #4ECDC4;
+            --ef-ii-color: #45B7D1;
+            --em-color: #FF9F1C;
+        }}
+        body {{ background-color: #f8f9fa; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }}
+        .card {{ border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }}
+        .btn-primary {{ background-color: #4361ee; border-color: #4361ee; }}
+        .btn-primary:hover {{ background-color: #3a0ca3; border-color: #3a0ca3; }}
+        .segmento-ei {{ border-left: 5px solid var(--ei-color) !important; }}
+        .segmento-ef-i {{ border-left: 5px solid var(--ef-i-color) !important; }}
+        .segmento-ef-ii {{ border-left: 5px solid var(--ef-ii-color) !important; }}
+        .segmento-em {{ border-left: 5px solid var(--em-color) !important; }}
+        .chart-container {{ position: relative; height: 300px; width: 100%; }}
+        .analise-ia {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }}
+        
+        /* CORREÇÕES DE TABELAS */
+        .table-fixed {{
+            table-layout: fixed;
+            width: 100%;
+        }}
+        
+        .table-fixed th,
+        .table-fixed td {{
+            padding: 12px 10px;
+            vertical-align: middle;
+        }}
+        
+        /* Larguras específicas para cada coluna */
+        .col-nome {{ width: 220px; min-width: 200px; max-width: 250px; }}
+        .col-data {{ width: 100px; min-width: 90px; max-width: 120px; }}
+        .col-participantes {{ width: 90px; min-width: 80px; max-width: 100px; }}
+        .col-investimento {{ width: 130px; min-width: 120px; max-width: 150px; }}
+        .col-receita {{ width: 130px; min-width: 120px; max-width: 150px; }}
+        .col-lucro {{ width: 130px; min-width: 120px; max-width: 150px; }}
+        .col-margem {{ width: 100px; min-width: 90px; max-width: 120px; }}
+        .col-roi {{ width: 100px; min-width: 90px; max-width: 120px; }}
+        .col-payback {{ width: 110px; min-width: 100px; max-width: 130px; }}
+        .col-acoes {{ width: 140px; min-width: 130px; max-width: 160px; }}
+        
+        /* Para tabela de atividades */
+        .col-atividade-nome {{ width: 200px; min-width: 180px; max-width: 250px; }}
+        .col-atividade-segmento {{ width: 140px; min-width: 120px; max-width: 160px; }}
+        .col-atividade-alunos {{ width: 80px; min-width: 70px; max-width: 90px; }}
+        .col-atividade-nao-alunos {{ width: 100px; min-width: 90px; max-width: 110px; }}
+        .col-atividade-receita {{ width: 120px; min-width: 110px; max-width: 130px; }}
+        .col-atividade-custo {{ width: 120px; min-width: 110px; max-width: 130px; }}
+        .col-atividade-lucro {{ width: 120px; min-width: 110px; max-width: 130px; }}
+        .col-atividade-margem {{ width: 100px; min-width: 90px; max-width: 110px; }}
+        
+        /* Overflow controlado */
+        .text-truncate-cell {{
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: block;
+        }}
+        
+        /* Badges com tamanho consistente */
+        .badge-fixed {{
+            display: inline-block;
+            min-width: 75px;
+            text-align: center;
+            padding: 5px 8px;
+            font-size: 0.85em;
+        }}
+        
+        /* Altura uniforme para cards */
+        .card-custo {{
+            min-height: 350px;
+            display: flex;
+            flex-direction: column;
+        }}
+        
+        .card-custo .card-body {{
+            flex-grow: 1;
+            overflow-y: auto;
+        }}
+        
+        @media (max-width: 1200px) {{
+            .col-nome {{ width: 180px; min-width: 160px; }}
+            .col-investimento, .col-receita, .col-lucro {{ width: 110px; min-width: 100px; }}
+        }}
+        
+        @media (max-width: 992px) {{
+            .table-responsive {{
+                font-size: 0.9em;
+            }}
+            .table-fixed th,
+            .table-fixed td {{
+                padding: 8px 6px;
+            }}
+        }}
+        
+        /* Melhorias para a seção de simulação */
+        .atividade-row {{
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }}
+        
+        .custo-calculado {{
+            background-color: #e7f3ff;
+            border-left: 4px solid #007bff;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-size: 0.9em;
+        }}
+        
+        .add-atividade {{
+            background-color: #e9ecef;
+            border: 2px dashed #6c757d;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }}
+        
+        .add-atividade:hover {{
+            background-color: #d4edda;
+            border-color: #28a745;
+        }}
+        
+        /* Estilos para alerts */
+        .recomendacao {{
+            background-color: #d4edda;
+            border-left: 4px solid #28a745;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }}
+        
+        .alerta {{
+            background-color: #f8d7da;
+            border-left: 4px solid #dc3545;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }}
+        
+        .dica {{
+            background-color: #d1ecf1;
+            border-left: 4px solid #17a2b8;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }}
+        
+        .benchmark-card {{
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+        }}
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-robot"></i> Business Plan com IA
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/"><i class="fas fa-home"></i> Início</a>
+                <a class="nav-link" href="/simulacao"><i class="fas fa-plus"></i> Nova</a>
+                <a class="nav-link" href="/dashboard"><i class="fas fa-chart-line"></i> Dashboard</a>
+                <a class="nav-link" href="/analise_ia"><i class="fas fa-brain"></i> Análise IA</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        {content}
+    </div>
+
+    <footer class="bg-dark text-white mt-5">
+        <div class="container text-center py-4">
+            <p><i class="fas fa-robot"></i> Sistema com Análise de Inteligência Artificial</p>
+            <p class="mb-0">© 2024 - Análise inteligente de planos de negócios escolares</p>
+        </div>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>'''
+
+def formatar_analise_ia(texto_analise: str) -> str:
+    """Formata o texto da análise da IA para HTML"""
+    if not texto_analise:
+        return '<p class="text-muted">Nenhuma análise disponível.</p>'
     
-    turma_nome_lower = turma_nome.lower()
+    # Substituir markdown por HTML básico
+    html = texto_analise.replace('# ', '<h5>').replace('\n#', '</h5>\n<h5>')
+    html = html.replace('## ', '<h6 class="mt-3">').replace('\n##', '</h6>\n<h6>')
+    html = html.replace('- ', '<li>').replace('\n-', '</li>\n<li>')
+    html = html.replace('**', '<strong>').replace('**', '</strong>')
+    html = html.replace('\n\n', '</p><p>')
+    html = html.replace('\n', '<br>')
     
-    # Verificar se é EM
-    if 'em' in turma_nome_lower:
-        return "EM"
-    # Verificar se é EF II
-    elif any(x in turma_nome_lower for x in ['6', '7', '8', '9', 'ano', 'ef']):
-        return "EF_II"
-    else:
+    # Adicionar classes
+    html = html.replace('✅', '<span class="text-success">✅</span>')
+    html = html.replace('⚠️', '<span class="text-warning">⚠️</span>')
+    html = html.replace('🎯', '<span class="text-primary">🎯</span>')
+    html = html.replace('📋', '<span class="text-info">📋</span>')
+    
+    return f'<div class="analise-texto">{html}</div>'
+
+@app.route('/')
+def index():
+    """Página inicial"""
+    content = '''
+    <div class="row">
+        <div class="col-lg-10 mx-auto">
+            <div class="analise-ia text-center">
+                <h1 class="display-4 mb-4">
+                    <i class="fas fa-robot"></i> Business Plan com Análise de IA
+                </h1>
+                <p class="lead mb-4">
+                    Crie seu plano de negócios escolar e receba análise inteligente com recomendações personalizadas
+                </p>
+                <div class="row mt-4">
+                    <div class="col-md-4">
+                        <div class="card bg-white text-dark">
+                            <div class="card-body">
+                                <i class="fas fa-brain fa-3x mb-3" style="color: #667eea;"></i>
+                                <h5>Análise Inteligente</h5>
+                                <p>IA analisa seu plano e sugere melhorias</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card bg-white text-dark">
+                            <div class="card-body">
+                                <i class="fas fa-chart-line fa-3x mb-3" style="color: #4ECDC4;"></i>
+                                <h5>Benchmarks</h5>
+                                <p>Compare com padrões do setor</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card bg-white text-dark">
+                            <div class="card-body">
+                                <i class="fas fa-lightbulb fa-3x mb-3" style="color: #FF9F1C;"></i>
+                                <h5>Recomendações</h5>
+                                <p>Planos de ação personalizados</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <a href="/simulacao" class="btn btn-light btn-lg mt-4">
+                    <i class="fas fa-rocket"></i> Começar Agora
+                </a>
+            </div>
+            
+            <div class="card mt-4">
+                <div class="card-header bg-primary text-white">
+                    <h4 class="mb-0"><i class="fas fa-info-circle"></i> Como funciona a análise de IA</h4>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h5><i class="fas fa-check-circle text-success"></i> O que a IA analisa:</h5>
+                            <ul>
+                                <li>Rentabilidade do projeto</li>
+                                <li>Estrutura de custos</li>
+                                <li>Precificação adequada</li>
+                                <li>Alocação de recursos</li>
+                                <li>Riscos e oportunidades</li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <h5><i class="fas fa-bullseye text-warning"></i> Benefícios:</h5>
+                            <ul>
+                                <li>Detecção de problemas antecipada</li>
+                                <li>Otimização de custos</li>
+                                <li>Maximização de receitas</li>
+                                <li>Plano de ação específico</li>
+                                <li>Comparação com mercado</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    '''
+    return get_base_html("Business Plan com IA", content)
+
+@app.route('/simulacao')
+@app.route('/simulacao/<int:simulacao_id>')
+def simulacao(simulacao_id=None):
+    """Página de simulação"""
+    modo_edicao = simulacao_id is not None
+    dados_edicao = {}
+    
+    if modo_edicao:
         try:
-            if turma_nome_lower[0].isdigit():
-                return "EF_II"
-            else:
-                return "EM"
-        except:
-            return "EF_II"
-
-def obter_horarios_turma(turma_nome):
-    """Retorna os períodos disponíveis para a turma"""
-    segmento = obter_segmento_turma(turma_nome)
-    if segmento == "EM":
-        return [1, 2, 3, 4, 5, 6, 7]  # 7 períodos para EM
-    else:
-        return [1, 2, 3, 4, 5]  # 5 períodos para EF II
-
-def obter_horario_real(turma_nome, periodo):
-    """Retorna o horário real formatado"""
-    segmento = obter_segmento_turma(turma_nome)
+            conn = sqlite3.connect(DATABASE)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM simulacoes WHERE id = ?', (simulacao_id,))
+            simulacao = cursor.fetchone()
+            if simulacao:
+                dados_completos = json.loads(simulacao['dados_completos'])
+                dados_edicao = {
+                    'id': simulacao_id,
+                    'nome': simulacao['nome'],
+                    'dados_entrada': dados_completos.get('entrada', {}),
+                    'resultados': dados_completos.get('resultados', {}),
+                    'atividades': dados_completos.get('atividades', []),
+                    'custos': dados_completos.get('custos', {}),
+                    'meses_analise': dados_completos.get('entrada', {}).get('meses_analise', 24)
+                }
+            conn.close()
+        except Exception as e:
+            print(f"Erro ao carregar: {e}")
+            return redirect('/dashboard')
     
-    if segmento == "EM":
-        horarios = {
-            1: "07:00 - 07:50",
-            2: "07:50 - 08:40", 
-            3: "08:40 - 09:30",
-            4: "09:50 - 10:40",
-            5: "10:40 - 11:30",
-            6: "11:30 - 12:20",
-            7: "12:20 - 13:10"
-        }
-    else:
-        horarios = {
-            1: "07:50 - 08:40",
-            2: "08:40 - 09:30",
-            3: "09:50 - 10:40",
-            4: "10:40 - 11:30",
-            5: "11:30 - 12:20"
-        }
+    # HTML dos segmentos
+    segmentos_html = ""
+    for sigla, info in SEGMENTOS.items():
+        segmentos_html += f'''
+        <div class="col-md-6 mb-4">
+            <div class="card segmento-card segmento-{sigla.replace('_', '-')}">
+                <div class="card-header" style="background-color: {info['cor']}; color: white;">
+                    <h5 class="mb-0"><i class="fas fa-graduation-cap"></i> {info['nome']}</h5>
+                    <small>{info['descricao']}</small>
+                </div>
+                <div class="card-body">
+                    <div id="atividades_container_{sigla}" class="mb-3">
+                        <!-- Atividades serão adicionadas aqui -->
+                    </div>
+                    <div class="add-atividade mb-3" onclick="adicionarAtividade('{sigla}')">
+                        <i class="fas fa-plus-circle fa-2x text-success mb-2"></i>
+                        <p class="mb-0">Adicionar atividade</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        '''
     
-    return horarios.get(periodo, f"Período {periodo}")
-
-def calcular_carga_maxima(serie):
-    """Calcula a quantidade máxima de aulas semanais"""
-    if not serie:
-        return 25
-    
-    serie_lower = serie.lower()
-    if 'em' in serie_lower or serie_lower in ['1em', '2em', '3em']:
-        return 35  # EM: 7 aulas × 5 dias
-    else:
-        return 25  # EF II: 5 aulas × 5 dias
-
-def converter_dia_para_semana(dia):
-    """Converte dia do formato completo para abreviado"""
-    if dia == "segunda": return "seg"
-    elif dia == "terca": return "ter"
-    elif dia == "quarta": return "qua"
-    elif dia == "quinta": return "qui"
-    elif dia == "sexta": return "sex"
-    else: return dia
-
-def converter_dia_para_completo(dia):
-    """Converte dia do formato abreviado para completo"""
-    if dia == "seg": return "segunda"
-    elif dia == "ter": return "terca"
-    elif dia == "qua": return "quarta"
-    elif dia == "qui": return "quinta"
-    elif dia == "sex": return "sexta"
-    else: return dia
-
-def converter_disponibilidade_para_semana(disponibilidade):
-    """Converte conjunto de disponibilidade para formato DIAS_SEMANA"""
-    convertido = []
-    for dia in disponibilidade:
-        dia_convertido = converter_dia_para_semana(dia)
-        if dia_convertido in DIAS_SEMANA:
-            convertido.append(dia_convertido)
-    return convertido
-
-def converter_disponibilidade_para_completo(disponibilidade):
-    """Converte conjunto de disponibilidade para formato completo"""
-    convertido = []
-    for dia in disponibilidade:
-        convertido.append(converter_dia_para_completo(dia))
-    return convertido
-
-# ============================================
-# FUNÇÕES DE ACESSO SEGURO A AULAS (CORRIGIDAS)
-# ============================================
-
-def obter_turma_aula(aula):
-    """Obtém a turma de uma aula de forma segura"""
-    if isinstance(aula, Aula):
-        return aula.turma
-    elif isinstance(aula, dict) and 'turma' in aula:
-        return aula['turma']
-    elif hasattr(aula, 'turma'):
-        return aula.turma
-    return None
-
-def obter_disciplina_aula(aula):
-    """Obtém a disciplina de uma aula de forma segura"""
-    if isinstance(aula, Aula):
-        return aula.disciplina
-    elif isinstance(aula, dict) and 'disciplina' in aula:
-        return aula['disciplina']
-    elif hasattr(aula, 'disciplina'):
-        return aula.disciplina
-    return None
-
-def obter_professor_aula(aula):
-    """Obtém o professor de uma aula de forma segura"""
-    if isinstance(aula, Aula):
-        return aula.professor
-    elif isinstance(aula, dict) and 'professor' in aula:
-        return aula['professor']
-    elif hasattr(aula, 'professor'):
-        return aula.professor
-    return None
-
-def obter_dia_aula(aula):
-    """Obtém o dia de uma aula de forma segura"""
-    if isinstance(aula, Aula):
-        return aula.dia
-    elif isinstance(aula, dict) and 'dia' in aula:
-        return aula['dia']
-    elif hasattr(aula, 'dia'):
-        return aula.dia
-    return None
-
-def obter_horario_aula(aula):
-    """Obtém o horário de uma aula de forma segura"""
-    if isinstance(aula, Aula):
-        return aula.horario
-    elif isinstance(aula, dict) and 'horario' in aula:
-        return aula['horario']
-    elif hasattr(aula, 'horario'):
-        return aula.horario
-    return None
-
-def obter_segmento_aula(aula):
-    """Obtém o segmento de uma aula de forma segura"""
-    if isinstance(aula, Aula):
-        return aula.segmento if hasattr(aula, 'segmento') else None
-    elif isinstance(aula, dict) and 'segmento' in aula:
-        return aula['segmento']
-    elif hasattr(aula, 'segmento'):
-        return aula.segmento
-    return None
-
-# ============================================
-# SISTEMA DE DIAGNÓSTICO DE GRADE (CORRIGIDO)
-# ============================================
-
-def diagnosticar_grade(turmas, professores, disciplinas, aulas_alocadas):
-    """Diagnóstico completo do que impede a grade de ficar 100% completa"""
-    diagnostico = {
-        'status': '❌ INCOMPLETA',
-        'completude': 0,
-        'problemas': [],
-        'sugestoes': [],
-        'estatisticas': {},
-        'detalhes_por_turma': {},
-        'professores_saturados': [],
-        'horarios_conflitantes': []
+    # HTML dos custos - VERSÃO CORRIGIDA
+    campos_custos = ""
+    categorias = {
+        'investimento_inicial': ('info', 'Investimento Inicial'),
+        'custos_mensais_fixos': ('warning', 'Custos Mensais Fixos'),
+        'custos_mensais_variaveis': ('primary', 'Custos Variáveis'),
+        'marketing': ('success', 'Marketing'),
+        'recursos_humanos': ('danger', 'Recursos Humanos')
     }
     
-    if not aulas_alocadas:
-        return diagnostico
+    # Mapeamento de ícones
+    icons_map = {
+        'investimento_inicial': 'tools',
+        'custos_mensais_fixos': 'dollar-sign',
+        'custos_mensais_variaveis': 'shopping-cart',
+        'marketing': 'bullhorn',
+        'recursos_humanos': 'users'
+    }
     
-    # Converter todas as aulas para formato consistente
-    aulas_consistente = []
-    for aula in aulas_alocadas:
-        aulas_consistente.append({
-            'turma': obter_turma_aula(aula),
-            'disciplina': obter_disciplina_aula(aula),
-            'professor': obter_professor_aula(aula),
-            'dia': obter_dia_aula(aula),
-            'horario': obter_horario_aula(aula),
-            'segmento': obter_segmento_aula(aula) or obter_segmento_turma(obter_turma_aula(aula))
+    for categoria, (cor, titulo) in categorias.items():
+        campos_custos += f'''
+        <div class="col-md-6 mb-4">
+            <div class="card card-custo h-100">
+                <div class="card-header bg-{cor} text-white">
+                    <h5 class="mb-0"><i class="fas fa-{icons_map.get(categoria, "question-circle")}"></i> {titulo}</h5>
+                </div>
+                <div class="card-body">
+        '''
+        
+        for item in CATEGORIAS_CUSTOS[categoria]:
+            campo_id = f"{categoria}_{item.replace(' ', '_').lower()}"
+            is_mensal = 'mensais' in categoria
+            valor_edicao = 0
+            if dados_edicao.get('custos', {}).get(categoria, {}).get(item, {}):
+                valor_edicao = dados_edicao['custos'][categoria][item].get('valor', 0)
+            
+            campos_custos += f'''
+            <div class="mb-3">
+                <label class="form-label">{item}:</label>
+                <div class="input-group">
+                    <span class="input-group-text">R$</span>
+                    <input type="number" class="form-control campo-custo" 
+                           id="{campo_id}" data-categoria="{categoria}"
+                           data-item="{item}" data-mensal="{str(is_mensal).lower()}"
+                           value="{valor_edicao}" min="0" step="10">
+                    <span class="input-group-text">{'/mês' if is_mensal else ''}</span>
+                </div>
+            </div>
+            '''
+        
+        campos_custos += '''
+                </div>
+            </div>
+        </div>
+        '''
+    
+    botao_acao = "Calcular e Analisar com IA" if not modo_edicao else "Atualizar e Reanalisar"
+    acao_js = f"calcularSimulacao({simulacao_id if modo_edicao else 'null'})"
+    
+    content = f'''
+    <div class="row">
+        <div class="col-lg-12">
+            <div class="card shadow">
+                <div class="card-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                    <h3 class="mb-0"><i class="fas fa-calculator"></i> {'Editar Simulação' if modo_edicao else 'Nova Simulação'} com IA</h3>
+                </div>
+                <div class="card-body">
+                    <form id="simulacaoForm">
+                        <!-- Configuração -->
+                        <div class="row mb-4">
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Nome da Simulação:</label>
+                                    <input type="text" class="form-control" id="nome_simulacao" 
+                                           value="{dados_edicao.get('nome', 'Meu Plano Escolar')}">
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label class="form-label">Meses para análise:</label>
+                                    <select class="form-select" id="meses_analise">
+                                        <option value="12">12 meses</option>
+                                        <option value="24" selected>24 meses</option>
+                                        <option value="36">36 meses</option>
+                                        <option value="60">60 meses</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Atividades -->
+                        <div class="row mb-4">
+                            <div class="col-12">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-tasks"></i> Atividades por Segmento
+                                </h4>
+                                <p class="text-muted">A IA analisará cada atividade separadamente.</p>
+                                <div class="row">
+                                    {segmentos_html}
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Custos -->
+                        <div class="row mb-4">
+                            <div class="col-12">
+                                <h4 class="border-bottom pb-2 mb-3">
+                                    <i class="fas fa-money-bill-wave"></i> Custos do Projeto
+                                </h4>
+                                <div class="row">
+                                    {campos_custos}
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Resumo e IA -->
+                        <div class="row">
+                            <div class="col-md-5">
+                                <div class="card">
+                                    <div class="card-header bg-success text-white">
+                                        <h5 class="mb-0"><i class="fas fa-chart-line"></i> Resumo Financeiro</h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <div id="resumo_simulacao">
+                                            <p class="text-center text-muted">Preencha os dados para ver o resumo</p>
+                                        </div>
+                                        <div class="mt-3">
+                                            <button type="button" class="btn btn-primary w-100 mb-2" onclick="{acao_js}">
+                                                <i class="fas fa-robot"></i> {botao_acao}
+                                            </button>
+                                            <button type="button" class="btn btn-outline-secondary w-100 mb-2" onclick="resetForm()">
+                                                <i class="fas fa-redo"></i> Limpar
+                                            </button>
+                                            <button type="button" class="btn btn-outline-info w-100" onclick="carregarExemploIA()">
+                                                <i class="fas fa-magic"></i> Exemplo com IA
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-md-7">
+                                <div id="analise_rapida" class="mb-3">
+                                    <!-- Análise rápida em tempo real -->
+                                </div>
+                                <div id="graficos_container">
+                                    <!-- Gráficos -->
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Template atividade -->
+    <template id="template-atividade">
+        <div class="atividade-row">
+            <div class="row">
+                <div class="col-11">
+                    <h6><i class="fas fa-dumbbell"></i> <span class="nome-atividade">Nova Atividade</span></h6>
+                </div>
+                <div class="col-1 text-end">
+                    <i class="fas fa-times text-danger" style="cursor: pointer;" onclick="removerAtividade(this)"></i>
+                </div>
+            </div>
+            <div class="row g-2">
+                <div class="col-md-6">
+                    <input type="text" class="form-control form-control-sm mb-2 nome-atividade-input" placeholder="Nome da atividade" value="Nova Atividade">
+                </div>
+                <div class="col-md-6">
+                    <input type="number" class="form-control form-control-sm mb-2 custo-hora" placeholder="Custo/hora professor" value="50">
+                </div>
+                <div class="col-md-4">
+                    <input type="number" class="form-control form-control-sm mb-2 horas-semanais" placeholder="Horas/semana" value="4">
+                </div>
+                <div class="col-md-4">
+                    <input type="number" class="form-control form-control-sm mb-2 semanas-mes" placeholder="Semanas/mês" value="4">
+                </div>
+                <div class="col-md-4">
+                    <input type="number" class="form-control form-control-sm mb-2 custo-material" placeholder="Custo material/mês" value="100">
+                </div>
+                <div class="col-md-3">
+                    <input type="number" class="form-control form-control-sm mb-2 alunos" placeholder="Alunos" value="10">
+                </div>
+                <div class="col-md-3">
+                    <input type="number" class="form-control form-control-sm mb-2 nao-alunos" placeholder="Não-alunos" value="5">
+                </div>
+                <div class="col-md-3">
+                    <input type="number" class="form-control form-control-sm mb-2 receita-aluno" placeholder="Receita aluno/mês" value="150">
+                </div>
+                <div class="col-md-3">
+                    <input type="number" class="form-control form-control-sm mb-2 receita-nao-aluno" placeholder="Receita não-aluno/mês" value="200">
+                </div>
+            </div>
+            <div class="custo-calculado mt-2 p-2">
+                <div class="row small">
+                    <div class="col-6">
+                        <strong>Custo mensal:</strong><br>
+                        <span class="custo-mensal-atividade">R$ 900,00</span>
+                    </div>
+                    <div class="col-6">
+                        <strong>Receita mensal:</strong><br>
+                        <span class="receita-mensal-atividade">R$ 2.500,00</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {{
+        // Adicionar uma atividade inicial em cada segmento
+        Object.keys({json.dumps(SEGMENTOS)}).forEach(seg => {{
+            adicionarAtividade(seg, true);
+        }});
+        
+        // Configurar eventos
+        document.getElementById('nome_simulacao').addEventListener('input', atualizarResumoIA);
+        document.getElementById('meses_analise').addEventListener('change', atualizarResumoIA);
+        document.querySelectorAll('.campo-custo').forEach(campo => {{
+            campo.addEventListener('input', atualizarResumoIA);
+        }});
+        
+        atualizarResumoIA();
+    }});
+    
+    function adicionarAtividade(segmento, inicial = false) {{
+        const container = document.getElementById(`atividades_container_${{segmento}}`);
+        const template = document.getElementById('template-atividade').content.cloneNode(true);
+        
+        // Configurar eventos
+        const campos = template.querySelectorAll('input');
+        campos.forEach(campo => {{
+            campo.addEventListener('input', function() {{
+                if (this.classList.contains('nome-atividade-input')) {{
+                    this.closest('.atividade-row').querySelector('.nome-atividade').textContent = this.value;
+                }}
+                calcularAtividade(this.closest('.atividade-row'));
+                atualizarResumoIA();
+            }});
+        }});
+        
+        container.appendChild(template);
+        if (!inicial) {{
+            calcularAtividade(container.lastElementChild);
+            atualizarResumoIA();
+        }}
+    }}
+    
+    function removerAtividade(elemento) {{
+        elemento.closest('.atividade-row').remove();
+        atualizarResumoIA();
+    }}
+    
+    function calcularAtividade(atividadeRow) {{
+        const custoHora = parseFloat(atividadeRow.querySelector('.custo-hora').value) || 0;
+        const horasSemanais = parseFloat(atividadeRow.querySelector('.horas-semanais').value) || 0;
+        const semanasMes = parseFloat(atividadeRow.querySelector('.semanas-mes').value) || 4;
+        const custoMaterial = parseFloat(atividadeRow.querySelector('.custo-material').value) || 0;
+        const alunos = parseInt(atividadeRow.querySelector('.alunos').value) || 0;
+        const naoAlunos = parseInt(atividadeRow.querySelector('.nao-alunos').value) || 0;
+        const receitaAluno = parseFloat(atividadeRow.querySelector('.receita-aluno').value) || 0;
+        const receitaNaoAluno = parseFloat(atividadeRow.querySelector('.receita-nao-aluno').value) || 0;
+        
+        const custoProfessorMensal = custoHora * horasSemanais * semanasMes;
+        const custoMensalTotal = custoProfessorMensal + custoMaterial;
+        const receitaMensal = (alunos * receitaAluno) + (naoAlunos * receitaNaoAluno);
+        
+        atividadeRow.querySelector('.custo-mensal-atividade').textContent = 
+            `R$ ${{custoMensalTotal.toLocaleString('pt-BR')}}`;
+        atividadeRow.querySelector('.receita-mensal-atividade').textContent = 
+            `R$ ${{receitaMensal.toLocaleString('pt-BR')}}`;
+        
+        return {{ custoMensal: custoMensalTotal, receitaMensal: receitaMensal, alunos: alunos, naoAlunos: naoAlunos }};
+    }}
+    
+    function atualizarResumoIA() {{
+        // Coletar dados
+        let totalAlunos = 0, totalNaoAlunos = 0, receitaTotal = 0, custoAtividadesTotal = 0;
+        const atividades = [];
+        
+        Object.keys({json.dumps(SEGMENTOS)}).forEach(segmento => {{
+            const container = document.getElementById(`atividades_container_${{segmento}}`);
+            if (!container) return;
+            
+            const atividadesRows = container.querySelectorAll('.atividade-row');
+            atividadesRows.forEach(row => {{
+                const dados = calcularAtividade(row);
+                atividades.push({{
+                    segmento: segmento,
+                    nome: row.querySelector('.nome-atividade-input').value,
+                    ...dados
+                }});
+                
+                totalAlunos += dados.alunos;
+                totalNaoAlunos += dados.naoAlunos;
+                receitaTotal += dados.receitaMensal;
+                custoAtividadesTotal += dados.custoMensal;
+            }});
+        }});
+        
+        // Custos gerais
+        let investimentoTotal = 0, custoMensalTotal = custoAtividadesTotal;
+        document.querySelectorAll('.campo-custo').forEach(campo => {{
+            const valor = parseFloat(campo.value) || 0;
+            if (campo.getAttribute('data-mensal') === 'true') {{
+                custoMensalTotal += valor;
+            }} else {{
+                investimentoTotal += valor;
+            }}
+        }});
+        
+        // Indicadores
+        const lucroMensal = receitaTotal - custoMensalTotal;
+        const margemLucro = receitaTotal > 0 ? (lucroMensal / receitaTotal) * 100 : 0;
+        const mesesAnalise = parseInt(document.getElementById('meses_analise').value) || 24;
+        let paybackMeses = 0, roiPercentual = 0;
+        
+        if (lucroMensal > 0 && investimentoTotal > 0) {{
+            paybackMeses = investimentoTotal / lucroMensal;
+            roiPercentual = ((lucroMensal * mesesAnalise) / investimentoTotal) * 100;
+        }}
+        
+        // Atualizar resumo
+        document.getElementById('resumo_simulacao').innerHTML = `
+            <table class="table table-sm">
+                <tr><td>Atividades:</td><td class="text-end"><span class="badge bg-primary">${{atividades.length}}</span></td></tr>
+                <tr><td>Participantes:</td><td class="text-end"><strong>${{totalAlunos + totalNaoAlunos}}</strong></td></tr>
+                <tr><td>Receita mensal:</td><td class="text-end text-success">R$ ${{receitaTotal.toLocaleString('pt-BR')}}</td></tr>
+                <tr><td>Custo mensal:</td><td class="text-end text-danger">R$ ${{custoMensalTotal.toLocaleString('pt-BR')}}</td></tr>
+                <tr><td>Investimento:</td><td class="text-end">R$ ${{investimentoTotal.toLocaleString('pt-BR')}}</td></tr>
+                <tr class="table-info"><td><strong>Lucro mensal:</strong></td><td class="text-end"><strong>R$ ${{lucroMensal.toLocaleString('pt-BR')}}</strong></td></tr>
+                <tr><td>Margem de lucro:</td><td class="text-end"><span class="badge ${{margemLucro >= 30 ? 'bg-success' : margemLucro >= 15 ? 'bg-warning' : 'bg-danger'}}">${{margemLucro.toFixed(1)}}%</span></td></tr>
+                <tr><td>ROI (${{mesesAnalise}} meses):</td><td class="text-end"><span class="badge ${{roiPercentual >= 100 ? 'bg-success' : roiPercentual >= 50 ? 'bg-warning' : 'bg-danger'}}">${{roiPercentual.toFixed(1)}}%</span></td></tr>
+            </table>
+        `;
+        
+        // Análise rápida da IA
+        fazerAnaliseRapida({{
+            lucroMensal: lucroMensal,
+            margemLucro: margemLucro,
+            roiPercentual: roiPercentual,
+            paybackMeses: paybackMeses,
+            investimentoTotal: investimentoTotal,
+            atividadesCount: atividades.length
+        }});
+        
+        atualizarGraficos(atividades);
+    }}
+    
+    function fazerAnaliseRapida(dados) {{
+        const container = document.getElementById('analise_rapida');
+        let analiseHTML = '<div class="card"><div class="card-header bg-info text-white"><h6 class="mb-0"><i class="fas fa-bolt"></i> Análise Rápida</h6></div><div class="card-body">';
+        
+        // Análise baseada em benchmarks
+        if (dados.margemLucro < 15) {{
+            analiseHTML += `<div class="alerta"><i class="fas fa-exclamation-triangle"></i> <strong>Atenção:</strong> Margem de lucro baixa (${{dados.margemLucro.toFixed(1)}}%). Considere aumentar receitas ou reduzir custos.</div>`;
+        }} else if (dados.margemLucro >= 30) {{
+            analiseHTML += `<div class="recomendacao"><i class="fas fa-check-circle"></i> <strong>Excelente:</strong> Margem de lucro saudável (${{dados.margemLucro.toFixed(1)}}%).</div>`;
+        }}
+        
+        if (dados.roiPercentual < 50) {{
+            analiseHTML += `<div class="alerta"><i class="fas fa-exclamation-triangle"></i> ROI abaixo do ideal (${{dados.roiPercentual.toFixed(1)}}%). Investimento pode ser muito alto para o retorno.</div>`;
+        }}
+        
+        if (dados.paybackMeses > 36 && dados.paybackMeses > 0) {{
+            analiseHTML += `<div class="alerta"><i class="fas fa-clock"></i> Payback muito longo (${{dados.paybackMeses.toFixed(1)}} meses). Considere reduzir investimento inicial.</div>`;
+        }}
+        
+        if (dados.atividadesCount === 0) {{
+            analiseHTML += `<div class="dica"><i class="fas fa-lightbulb"></i> Adicione atividades para começar a análise.</div>`;
+        }} else if (dados.atividadesCount < 3) {{
+            analiseHTML += `<div class="dica"><i class="fas fa-lightbulb"></i> Considere diversificar com mais atividades para reduzir riscos.</div>`;
+        }}
+        
+        analiseHTML += '</div></div>';
+        container.innerHTML = analiseHTML;
+    }}
+    
+    function atualizarGraficos(atividades) {{
+        if (atividades.length === 0) return;
+        
+        const container = document.getElementById('graficos_container');
+        container.innerHTML = `
+            <div class="card mt-3">
+                <div class="card-header">
+                    <h6 class="mb-0"><i class="fas fa-chart-bar"></i> Visualização</h6>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="chartAtividades"></canvas>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        // Gráfico simples
+        setTimeout(() => {{
+            const ctx = document.getElementById('chartAtividades').getContext('2d');
+            const cores = ['#FF6B8B', '#4ECDC4', '#45B7D1', '#FF9F1C'];
+            new Chart(ctx, {{
+                type: 'bar',
+                data: {{
+                    labels: atividades.slice(0, 8).map(a => a.nome.substring(0, 10) + '...'),
+                    datasets: [
+                        {{
+                            label: 'Receita',
+                            data: atividades.slice(0, 8).map(a => a.receitaMensal),
+                            backgroundColor: cores[0]
+                        }},
+                        {{
+                            label: 'Custo',
+                            data: atividades.slice(0, 8).map(a => a.custoMensal),
+                            backgroundColor: cores[2]
+                        }}
+                    ]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false
+                }}
+            }});
+        }}, 100);
+    }}
+    
+    async function calcularSimulacao(simulacaoId = null) {{
+        const btn = document.querySelector('button[onclick*="calcularSimulacao"]');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analisando com IA...';
+        btn.disabled = true;
+        
+        try {{
+            // Coletar dados
+            const dados = {{
+                nome: document.getElementById('nome_simulacao').value,
+                meses_analise: parseInt(document.getElementById('meses_analise').value) || 24
+            }};
+            
+            // Atividades
+            dados.atividades = [];
+            Object.keys({json.dumps(SEGMENTOS)}).forEach(segmento => {{
+                const container = document.getElementById(`atividades_container_${{segmento}}`);
+                if (!container) return;
+                
+                const atividadesRows = container.querySelectorAll('.atividade-row');
+                atividadesRows.forEach(row => {{
+                    dados.atividades.push({{
+                        segmento: segmento,
+                        nome: row.querySelector('.nome-atividade-input').value,
+                        custo_hora_professor: parseFloat(row.querySelector('.custo-hora').value) || 0,
+                        horas_semanais: parseFloat(row.querySelector('.horas-semanais').value) || 0,
+                        semanas_mes: parseFloat(row.querySelector('.semanas-mes').value) || 4,
+                        custo_material_mensal: parseFloat(row.querySelector('.custo-material').value) || 0,
+                        alunos: parseInt(row.querySelector('.alunos').value) || 0,
+                        nao_alunos: parseInt(row.querySelector('.nao-alunos').value) || 0,
+                        receita_aluno: parseFloat(row.querySelector('.receita-aluno').value) || 0,
+                        receita_nao_aluno: parseFloat(row.querySelector('.receita-nao-aluno').value) || 0
+                    }});
+                }});
+            }});
+            
+            // Custos
+            dados.custos = {{}};
+            document.querySelectorAll('.campo-custo').forEach(campo => {{
+                const categoria = campo.getAttribute('data-categoria');
+                const item = campo.getAttribute('data-item');
+                const valor = parseFloat(campo.value) || 0;
+                const isMensal = campo.getAttribute('data-mensal') === 'true';
+                
+                if (!dados.custos[categoria]) {{
+                    dados.custos[categoria] = {{}};
+                }}
+                dados.custos[categoria][item] = {{ valor: valor, mensal: isMensal }};
+            }});
+            
+            // Enviar para API
+            const url = simulacaoId ? `/api/atualizar_simulacao_ia/${{simulacaoId}}` : '/api/calcular_com_ia';
+            const method = simulacaoId ? 'PUT' : 'POST';
+            
+            const response = await fetch(url, {{
+                method: method,
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(dados)
+            }});
+            
+            if (!response.ok) throw new Error(await response.text());
+            
+            const resultados = await response.json();
+            
+            // Mostrar sucesso
+            document.getElementById('analise_rapida').innerHTML = `
+                <div class="alert alert-success">
+                    <h5><i class="fas fa-check-circle"></i> Análise completa!</h5>
+                    <p>Redirecionando para relatório detalhado com IA...</p>
+                </div>
+            `;
+            
+            setTimeout(() => {{
+                window.location.href = '/resultado_com_ia';
+            }}, 2000);
+            
+        }} catch (error) {{
+            alert('Erro: ' + error.message);
+        }} finally {{
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+        }}
+    }}
+    
+    function carregarExemploIA() {{
+        if (confirm('Carregar exemplo otimizado com recomendações de IA?')) {{
+            // Limpar
+            Object.keys({json.dumps(SEGMENTOS)}).forEach(seg => {{
+                const container = document.getElementById(`atividades_container_${{seg}}`);
+                if (container) container.innerHTML = '';
+            }});
+            
+            // Exemplo otimizado pela IA
+            const exemplos = [
+                {{ segmento: 'ei', nome: 'Musicalização Infantil', custo_hora: 48, horas: 8, alunos: 18, nao_alunos: 6, receita_aluno: 135, receita_nao_aluno: 180, material: 220 }},
+                {{ segmento: 'ef_i', nome: 'Robótica Educacional', custo_hora: 65, horas: 10, alunos: 16, nao_alunos: 8, receita_aluno: 195, receita_nao_aluno: 260, material: 450 }},
+                {{ segmento: 'ef_ii', nome: 'Olimpíadas de Matemática', custo_hora: 58, horas: 6, alunos: 20, nao_alunos: 10, receita_aluno: 160, receita_nao_aluno: 210, material: 180 }},
+                {{ segmento: 'em', nome: 'Preparatório Universitário', custo_hora: 75, horas: 15, alunos: 22, nao_alunos: 12, receita_aluno: 240, receita_nao_aluno: 320, material: 350 }}
+            ];
+            
+            exemplos.forEach(ex => {{
+                const container = document.getElementById(`atividades_container_${{ex.segmento}}`);
+                const template = document.getElementById('template-atividade').content.cloneNode(true);
+                
+                template.querySelector('.nome-atividade-input').value = ex.nome;
+                template.querySelector('.nome-atividade').textContent = ex.nome;
+                template.querySelector('.custo-hora').value = ex.custo_hora;
+                template.querySelector('.horas-semanais').value = ex.horas;
+                template.querySelector('.alunos').value = ex.alunos;
+                template.querySelector('.nao-alunos').value = ex.nao_alunos;
+                template.querySelector('.receita-aluno').value = ex.receita_aluno;
+                template.querySelector('.receita-nao-aluno').value = ex.receita_nao_aluno;
+                template.querySelector('.custo-material').value = ex.material;
+                
+                container.appendChild(template);
+            }});
+            
+            // Custos otimizados
+            const custosOtimizados = {{
+                'investimento_inicial_reforma': 45000,
+                'investimento_inicial_equipamentos': 28000,
+                'custos_mensais_fixos_aluguel': 7500,
+                'custos_mensais_fixos_energia': 1200,
+                'recursos_humanos_salários_professores': 12000,
+                'marketing_site': 800
+            }};
+            
+            Object.entries(custosOtimizados).forEach(([id, valor]) => {{
+                const campo = document.getElementById(id);
+                if (campo) campo.value = valor;
+            }});
+            
+            document.getElementById('nome_simulacao').value = 'Plano Otimizado por IA';
+            atualizarResumoIA();
+        }}
+    }}
+    
+    function resetForm() {{
+        if (confirm('Limpar todos os dados?')) {{
+            Object.keys({json.dumps(SEGMENTOS)}).forEach(seg => {{
+                const container = document.getElementById(`atividades_container_${{seg}}`);
+                if (container) container.innerHTML = '';
+                adicionarAtividade(seg, true);
+            }});
+            
+            document.querySelectorAll('.campo-custo').forEach(campo => campo.value = 0);
+            document.getElementById('nome_simulacao').value = 'Meu Plano Escolar';
+            document.getElementById('meses_analise').value = '24';
+            
+            atualizarResumoIA();
+        }}
+    }}
+    </script>
+    '''
+    
+    return get_base_html("Simulação com IA", content)
+
+def analisar_com_ia(dados_simulacao: Dict) -> Dict:
+    """
+    Analisa a simulação usando IA (OpenAI)
+    Retorna recomendações, alertas e plano de ação
+    """
+    try:
+        # Preparar prompt para a IA
+        atividades_texto = ""
+        for i, atividade in enumerate(dados_simulacao.get('atividades', [])[:10], 1):
+            atividades_texto += f"{i}. {atividade['nome']} ({atividade['segmento']}): "
+            atividades_texto += f"{atividade['alunos']} alunos + {atividade['nao_alunos']} não-alunos, "
+            atividades_texto += f"Receita: R${atividade.get('receita_mensal', 0):,.0f}/mês, "
+            atividades_texto += f"Custo: R${atividade.get('custo_total_mensal', 0):,.0f}/mês\n"
+        
+        resumo = dados_simulacao.get('resultados', {})
+        
+        prompt = f"""
+        Analise este plano de negócios para uma escola/centro educacional:
+        
+        RESUMO:
+        - Total de atividades: {len(dados_simulacao.get('atividades', []))}
+        - Investimento inicial: R${resumo.get('investimento_inicial', 0):,.0f}
+        - Receita mensal: R${resumo.get('receita_mensal_atividades', 0):,.0f}
+        - Custo mensal total: R${resumo.get('custo_mensal_total', 0):,.0f}
+        - Lucro mensal: R${resumo.get('lucro_mensal', 0):,.0f}
+        - Margem de lucro: {resumo.get('margem_lucro', 0):.1f}%
+        - ROI ({resumo.get('meses_analise', 24)} meses): {resumo.get('roi_percentual', 0):.1f}%
+        - Payback: {resumo.get('payback_meses', 0):.1f} meses
+        
+        ATIVIDADES:
+        {atividades_texto}
+        
+        Por favor, forneça uma análise em português brasileiro com:
+        1. PONTOS FORTES (até 3 itens)
+        2. PONTOS DE ATENÇÃO/RISCOS (até 3 itens)
+        3. RECOMENDAÇÕES ESPECÍFICAS (3-5 recomendações práticas)
+        4. PLANO DE AÇÃO (passos concretos para implementação)
+        5. BENCHMARK COMPARATIVO (como está vs mercado)
+        
+        Seja específico, prático e foque em ações que possam ser implementadas.
+        Use markdown para formatação.
+        """
+        
+        # Chamar OpenAI API (versão simplificada se não tiver chave)
+        if openai.api_key and openai.api_key != '':
+            try:
+                response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "Você é um consultor especializado em planejamento financeiro para instituições educacionais."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=1500
+                )
+                analise_texto = response.choices[0].message.content
+            except:
+                analise_texto = gerar_analise_fallback(dados_simulacao)
+        else:
+            # Fallback: análise baseada em regras
+            analise_texto = gerar_analise_fallback(dados_simulacao)
+        
+        # Processar a análise
+        return {
+            'analise_completa': analise_texto,
+            'recomendacoes': extrair_recomendacoes(analise_texto),
+            'alertas': identificar_alertas(resumo),
+            'pontos_fortes': identificar_pontos_fortes(resumo),
+            'plano_acao': extrair_plano_acao(analise_texto)
+        }
+        
+    except Exception as e:
+        print(f"Erro na análise com IA: {e}")
+        return {
+            'analise_completa': "Análise temporariamente indisponível. Use os benchmarks abaixo para orientação.",
+            'recomendacoes': [],
+            'alertas': identificar_alertas(dados_simulacao.get('resultados', {})),
+            'pontos_fortes': identificar_pontos_fortes(dados_simulacao.get('resultados', {})),
+            'plano_acao': []
+        }
+
+def gerar_analise_fallback(dados_simulacao: Dict) -> str:
+    """Gera análise quando a IA não está disponível"""
+    resumo = dados_simulacao.get('resultados', {})
+    
+    analise = "# Análise do Plano de Negócios\n\n"
+    
+    # Pontos fortes
+    analise += "## ✅ PONTOS FORTES\n\n"
+    if resumo.get('margem_lucro', 0) >= 25:
+        analise += f"- Margem de lucro saudável ({resumo.get('margem_lucro', 0):.1f}%)\n"
+    if resumo.get('roi_percentual', 0) >= 100:
+        analise += f"- ROI excelente ({resumo.get('roi_percentual', 0):.1f}% em {resumo.get('meses_analise', 24)} meses)\n"
+    if resumo.get('payback_meses', 0) <= 24 and resumo.get('payback_meses', 0) > 0:
+        analise += f"- Payback rápido ({resumo.get('payback_meses', 0):.1f} meses)\n"
+    if len(dados_simulacao.get('atividades', [])) >= 4:
+        analise += f"- Boa diversificação ({len(dados_simulacao.get('atividades', []))} atividades)\n"
+    
+    # Pontos de atenção
+    analise += "\n## ⚠️ PONTOS DE ATENÇÃO\n\n"
+    if resumo.get('margem_lucro', 0) < 15:
+        analise += f"- Margem de lucro baixa ({resumo.get('margem_lucro', 0):.1f}%). Considere revisar preços ou custos.\n"
+    if resumo.get('payback_meses', 0) > 36:
+        analise += f"- Payback muito longo ({resumo.get('payback_meses', 0):.1f} meses). Risco alto.\n"
+    if resumo.get('investimento_inicial', 0) > 100000:
+        analise += f"- Investimento inicial elevado (R${resumo.get('investimento_inicial', 0):,.0f})\n"
+    
+    # Recomendações
+    analise += "\n## 🎯 RECOMENDAÇÕES\n\n"
+    analise += "1. **Otimize a estrutura de custos**: Revise custos variáveis e negocie com fornecedores\n"
+    analise += "2. **Aumente o valor percebido**: Diferencie suas atividades para justificar preços mais altos\n"
+    analise += "3. **Diversifique as fontes de receita**: Considere pacotes semestrais/anuais com desconto\n"
+    analise += "4. **Controle o investimento inicial**: Foque em equipamentos essenciais primeiro\n"
+    analise += "5. **Monitore a relação aluno/professor**: Otimize para maximizar a rentabilidade\n"
+    
+    # Plano de ação
+    analise += "\n## 📋 PLANO DE AÇÃO\n\n"
+    analise += "**Mês 1-3:**\n"
+    analise += "- Implementar 2-3 atividades principais\n"
+    analise += "- Campanha de lançamento com preços promocionais\n"
+    analise += "- Contratação de equipe mínima\n\n"
+    
+    analise += "**Mês 4-6:**\n"
+    analise += "- Avaliar desempenho das atividades\n"
+    analise += "- Ajustar preços conforme aceitação do mercado\n"
+    analise += "- Expandir para atividades adicionais\n\n"
+    
+    analise += "**Mês 7-12:**\n"
+    analise += "- Buscar eficiências operacionais\n"
+    analise += "- Implementar pacotes de fidelização\n"
+    analise += "- Expandir para novos segmentos\n"
+    
+    return analise
+
+def extrair_recomendacoes(analise_texto: str) -> List[str]:
+    """Extrai recomendações da análise"""
+    recomendacoes = []
+    linhas = analise_texto.split('\n')
+    
+    for linha in linhas:
+        linha = linha.strip()
+        if linha.startswith('- ') or linha.startswith('* ') or linha.startswith('1. ') or linha.startswith('2. '):
+            if any(keyword in linha.lower() for keyword in ['recomendo', 'sugiro', 'aconselho', 'considere', 'sugestão']):
+                recomendacoes.append(linha)
+    
+    return recomendacoes[:5] if recomendacoes else [
+        "Revise a estrutura de custos para melhorar a margem",
+        "Considere aumentar o preço das atividades mais populares",
+        "Diversifique as fontes de receita com pacotes promocionais"
+    ]
+
+def identificar_alertas(resumo: Dict) -> List[Dict]:
+    """Identifica alertas baseados em benchmarks"""
+    alertas = []
+    
+    if resumo.get('margem_lucro', 0) < 15:
+        alertas.append({
+            'tipo': 'alto',
+            'mensagem': f'Margem de lucro muito baixa ({resumo.get("margem_lucro", 0):.1f}%)',
+            'acao': 'Aumente receitas ou reduza custos'
         })
     
-    # 1. ANÁLISE POR TURMA
-    total_aulas_necessarias = 0
-    total_aulas_alocadas = len(aulas_consistente)
+    if resumo.get('payback_meses', 0) > 36:
+        alertas.append({
+            'tipo': 'alto',
+            'mensagem': f'Payback muito longo ({resumo.get("payback_meses", 0):.1f} meses)',
+            'acao': 'Reduza investimento inicial ou aumente lucro'
+        })
     
-    for turma in turmas:
-        turma_nome = turma.nome
-        grupo_turma = turma.grupo
-        segmento = obter_segmento_turma(turma_nome)
+    if resumo.get('roi_percentual', 0) < 50:
+        alertas.append({
+            'tipo': 'medio',
+            'mensagem': f'ROI abaixo do ideal ({resumo.get("roi_percentual", 0):.1f}%)',
+            'acao': 'Otimize a relação custo-benefício'
+        })
+    
+    return alertas
+
+def identificar_pontos_fortes(resumo: Dict) -> List[Dict]:
+    """Identifica pontos fortes"""
+    pontos = []
+    
+    if resumo.get('margem_lucro', 0) >= 25:
+        pontos.append({
+            'aspecto': 'Rentabilidade',
+            'detalhe': f'Margem de lucro excelente: {resumo.get("margem_lucro", 0):.1f}%'
+        })
+    
+    if resumo.get('roi_percentual', 0) >= 100:
+        pontos.append({
+            'aspecto': 'Retorno sobre Investimento',
+            'detalhe': f'ROI muito bom: {resumo.get("roi_percentual", 0):.1f}%'
+        })
+    
+    if resumo.get('payback_meses', 0) <= 24 and resumo.get('payback_meses', 0) > 0:
+        pontos.append({
+            'aspecto': 'Recuperação do Investimento',
+            'detalhe': f'Payback rápido: {resumo.get("payback_meses", 0):.1f} meses'
+        })
+    
+    return pontos
+
+def extrair_plano_acao(analise_texto: str) -> List[str]:
+    """Extrai plano de ação"""
+    plano = []
+    dentro_plano = False
+    
+    for linha in analise_texto.split('\n'):
+        linha = linha.strip()
+        if 'PLANO DE AÇÃO' in linha or 'plano de ação' in linha.lower():
+            dentro_plano = True
+            continue
+        if dentro_plano and linha and (linha.startswith('- ') or linha.startswith('* ') or linha.startswith('1. ')):
+            plano.append(linha)
+        if dentro_plano and linha.startswith('##'):
+            break
+    
+    return plano[:6] if plano else [
+        "Mês 1-3: Implementação inicial e captação de alunos",
+        "Mês 4-6: Ajustes baseados em feedback e otimização",
+        "Mês 7-12: Expansão e consolidação"
+    ]
+
+@app.route('/api/calcular_com_ia', methods=['POST'])
+def api_calcular_com_ia():
+    """API para cálculo com análise de IA"""
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({'error': 'Sem dados'}), 400
         
-        # Calcular aulas necessárias para esta turma
-        aulas_necessarias_turma = 0
-        disciplinas_da_turma = []
+        print("Processando simulação com IA...")
         
-        for disc in disciplinas:
-            if turma_nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
-                aulas_necessarias_turma += disc.carga_semanal
-                disciplinas_da_turma.append(disc)
+        # Calcular resultados
+        resultados = calcular_resultados(dados)
         
-        total_aulas_necessarias += aulas_necessarias_turma
-        
-        # Contar aulas alocadas para esta turma
-        aulas_turma = [a for a in aulas_consistente if a['turma'] == turma_nome]
-        aulas_alocadas_turma = len(aulas_turma)
-        
-        # Calcular completude da turma
-        completude_turma = (aulas_alocadas_turma / aulas_necessarias_turma * 100) if aulas_necessarias_turma > 0 else 0
-        
-        # Detalhar por disciplina
-        faltas_disciplinas = []
-        for disc in disciplinas_da_turma:
-            aulas_disc = len([a for a in aulas_turma if a['disciplina'] == disc.nome])
-            if aulas_disc < disc.carga_semanal:
-                faltas = disc.carga_semanal - aulas_disc
-                faltas_disciplinas.append(f"{disc.nome} ({aulas_disc}/{disc.carga_semanal})")
-        
-        diagnostico['detalhes_por_turma'][turma_nome] = {
-            'necessarias': aulas_necessarias_turma,
-            'alocadas': aulas_alocadas_turma,
-            'completude': completude_turma,
-            'faltas_disciplinas': faltas_disciplinas,
-            'segmento': segmento,
-            'grupo': grupo_turma
+        # Gerar análise com IA
+        dados_simulacao = {
+            'entrada': dados,
+            'resultados': resultados,
+            'atividades': processar_atividades(dados.get('atividades', [])),
+            'custos': dados.get('custos', {})
         }
-    
-    # 2. CALCULAR COMPLETUDE GERAL
-    if total_aulas_necessarias > 0:
-        completude_geral = (total_aulas_alocadas / total_aulas_necessarias * 100)
-        diagnostico['completude'] = round(completude_geral, 1)
-        diagnostico['estatisticas']['total_necessario'] = total_aulas_necessarias
-        diagnostico['estatisticas']['total_alocado'] = total_aulas_alocadas
-        diagnostico['estatisticas']['faltam'] = total_aulas_necessarias - total_aulas_alocadas
-    
-    # 3. ANÁLISE DE PROFESSORES
-    for professor in professores:
-        # Contar aulas do professor
-        aulas_professor = len([a for a in aulas_consistente if a['professor'] == professor.nome])
         
-        # Verificar disponibilidade
-        dias_disponiveis = len(professor.disponibilidade) if hasattr(professor, 'disponibilidade') else 0
-        horarios_indisponiveis = len(professor.horarios_indisponiveis) if hasattr(professor, 'horarios_indisponiveis') else 0
+        analise_ia = analisar_com_ia(dados_simulacao)
         
-        # Calcular capacidade máxima
-        capacidade_maxima = dias_disponiveis * 7 - horarios_indisponiveis
+        # Salvar na sessão
+        session['simulacao_com_ia'] = {
+            'dados_entrada': dados,
+            'resultados': resultados,
+            'analise_ia': analise_ia,
+            'atividades_detalhadas': processar_atividades(dados.get('atividades', [])),
+            'nome_simulacao': dados.get('nome', 'Análise com IA')
+        }
         
-        if capacidade_maxima <= aulas_professor:
-            diagnostico['professores_saturados'].append({
-                'nome': professor.nome,
-                'aulas': aulas_professor,
-                'capacidade': capacidade_maxima,
-                'dias_disponiveis': dias_disponiveis,
-                'horarios_bloqueados': horarios_indisponiveis
-            })
-    
-    # 4. IDENTIFICAR PROBLEMAS PRINCIPAIS
-    for turma_nome, info in diagnostico['detalhes_por_turma'].items():
-        if info['faltas_disciplinas']:
-            turma_obj = next((t for t in turmas if t.nome == turma_nome), None)
-            grupo_turma = turma_obj.grupo if turma_obj else 'A'
-            
-            for falta in info['faltas_disciplinas']:
-                disc_nome = falta.split(' (')[0]
-                
-                # Verificar professores para esta disciplina
-                professores_disc = []
-                for prof in professores:
-                    if disc_nome in prof.disciplinas:
-                        if prof.grupo in [grupo_turma, "AMBOS"]:
-                            professores_disc.append(prof.nome)
-                
-                if not professores_disc:
-                    diagnostico['problemas'].append(f"❌ **{turma_nome}**: Nenhum professor para **{disc_nome}**")
-                    diagnostico['sugestoes'].append(f"👉 Adicione um professor que ministre **{disc_nome}** no grupo **{grupo_turma}**")
-                elif len(professores_disc) == 1:
-                    diagnostico['problemas'].append(f"⚠️ **{turma_nome}**: Apenas 1 professor para **{disc_nome}** ({professores_disc[0]})")
-                    diagnostico['sugestoes'].append(f"👉 Adicione um segundo professor para **{disc_nome}** ou aumente a disponibilidade de **{professores_disc[0]}**")
-    
-    # 5. Conflitos de horário
-    horarios_turma = {}
-    for aula in aulas_consistente:
-        chave = f"{aula['turma']}|{aula['dia']}|{aula['horario']}"
-        if chave not in horarios_turma:
-            horarios_turma[chave] = []
-        horarios_turma[chave].append(aula)
-    
-    for chave, aulas_conflito in horarios_turma.items():
-        if len(aulas_conflito) > 1:
-            turma = aulas_conflito[0]['turma']
-            dia = aulas_conflito[0]['dia']
-            horario = aulas_conflito[0]['horario']
-            disciplinas = [a['disciplina'] for a in aulas_conflito]
-            diagnostico['horarios_conflitantes'].append({
-                'turma': turma,
-                'dia': dia,
-                'horario': horario,
-                'disciplinas': disciplinas
-            })
-    
-    # 6. DEFINIR STATUS FINAL
-    if diagnostico['completude'] == 100:
-        diagnostico['status'] = '✅ COMPLETA'
-    elif diagnostico['completude'] >= 90:
-        diagnostico['status'] = '⚠️ QUASE COMPLETA'
-    elif diagnostico['completude'] >= 70:
-        diagnostico['status'] = '⚠️ PARCIAL'
-    else:
-        diagnostico['status'] = '❌ INCOMPLETA'
-    
-    # 7. SUGESTÕES AUTOMÁTICAS
-    if diagnostico['professores_saturados']:
-        for prof in diagnostico['professores_saturados'][:3]:
-            diagnostico['sugestoes'].append(f"👉 Professor **{prof['nome']}** está com {prof['aulas']}/{prof['capacidade']} aulas. Aumente disponibilidade ou reduza carga.")
-    
-    if total_aulas_necessarias > total_aulas_alocadas:
-        faltam = total_aulas_necessarias - total_aulas_alocadas
-        diagnostico['sugestoes'].append(f"👉 **Faltam {faltam} aulas no total**. Verifique disponibilidade de professores.")
-    
-    return diagnostico
+        # Salvar no banco
+        salvar_no_banco(dados, resultados, analise_ia)
+        
+        return jsonify({
+            **resultados,
+            'analise_disponivel': True,
+            'alertas': analise_ia.get('alertas', []),
+            'recomendacoes_count': len(analise_ia.get('recomendacoes', []))
+        })
+        
+    except Exception as e:
+        print(f"Erro na API com IA: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# ============================================
-# ALGORITMO AVANÇADO PARA COMPLETAR GRADES
-# ============================================
-
-class CompletadorDeGradeAvancado:
-    """Algoritmo avançado para completar grades incompletas"""
-    
-    def __init__(self, turmas, professores, disciplinas):
-        self.turmas = turmas
-        self.professores = professores
-        self.disciplinas = disciplinas
-        self.dias = ['segunda', 'terca', 'quarta', 'quinta', 'sexta']
-        self.max_iteracoes = 500
-    
-    def completar_grade(self, aulas_atuais):
-        """Tenta completar uma grade existente"""
-        if not aulas_atuais:
-            return self._gerar_grade_do_zero()
+@app.route('/api/atualizar_simulacao_ia/<int:simulacao_id>', methods=['PUT'])
+def api_atualizar_simulacao_ia(simulacao_id):
+    """API para atualizar com IA"""
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({'error': 'Sem dados'}), 400
         
-        # Converter para formato consistente
-        aulas = self._converter_para_dict(aulas_atuais)
+        # Calcular resultados
+        resultados = calcular_resultados(dados)
         
-        # Analisar estado atual
-        analise = self._analisar_estado(aulas)
+        # Gerar análise com IA
+        dados_simulacao = {
+            'entrada': dados,
+            'resultados': resultados,
+            'atividades': processar_atividades(dados.get('atividades', [])),
+            'custos': dados.get('custos', {})
+        }
         
-        # Se já está completa, retornar
-        if analise['completude'] == 100:
-            return self._converter_para_aulas(aulas)
+        analise_ia = analisar_com_ia(dados_simulacao)
         
-        # Tentar múltiplas estratégias
-        estrategias = [
-            self._estrategia_preencher_buracos,
-            self._estrategia_rebalancear_professores,
-            self._estrategia_permutar_horarios,
-            self._estrategia_busca_local
-        ]
+        # Salvar na sessão
+        session['simulacao_com_ia'] = {
+            'dados_entrada': dados,
+            'resultados': resultados,
+            'analise_ia': analise_ia,
+            'atividades_detalhadas': processar_atividades(dados.get('atividades', [])),
+            'nome_simulacao': dados.get('nome', 'Análise com IA')
+        }
         
-        for estrategia in estrategias:
-            st.info(f"Tentando estratégia: {estrategia.__name__}")
-            nova_aulas = estrategia(aulas, analise)
-            nova_analise = self._analisar_estado(nova_aulas)
+        # Atualizar no banco
+        try:
+            conn = sqlite3.connect(DATABASE)
+            cursor = conn.cursor()
             
-            if nova_analise['completude'] > analise['completude']:
-                aulas = nova_aulas
-                analise = nova_analise
-                
-                if analise['completude'] == 100:
-                    break
-        
-        # Converter de volta para objetos Aula
-        return self._converter_para_aulas(aulas)
-    
-    def _converter_para_dict(self, aulas):
-        """Converte aulas para formato dicionário"""
-        aulas_dict = []
-        for aula in aulas:
-            aulas_dict.append({
-                'turma': obter_turma_aula(aula),
-                'disciplina': obter_disciplina_aula(aula),
-                'professor': obter_professor_aula(aula),
-                'dia': obter_dia_aula(aula),
-                'horario': obter_horario_aula(aula),
-                'segmento': obter_segmento_aula(aula) or obter_segmento_turma(obter_turma_aula(aula))
-            })
-        return aulas_dict
-    
-    def _converter_para_aulas(self, aulas_dict):
-        """Converte dicionários para objetos Aula"""
-        aulas_objetos = []
-        for aula in aulas_dict:
-            aulas_objetos.append(Aula(
-                turma=aula['turma'],
-                disciplina=aula['disciplina'],
-                professor=aula['professor'],
-                dia=aula['dia'],
-                horario=aula['horario'],
-                segmento=aula['segmento']
+            cursor.execute('''
+            UPDATE simulacoes SET
+                nome = ?,
+                data_atualizacao = ?,
+                total_alunos = ?,
+                total_participantes = ?,
+                investimento_total = ?,
+                custo_mensal_total = ?,
+                receita_mensal_total = ?,
+                lucro_mensal_total = ?,
+                payback_meses = ?,
+                roi_percentual = ?,
+                margem_lucro = ?,
+                dados_completos = ?,
+                analise_ia = ?
+            WHERE id = ?
+            ''', (
+                dados.get('nome', 'Simulação IA'),
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                resultados['total_alunos'],
+                resultados['total_participantes'],
+                resultados['investimento_inicial'],
+                resultados['custo_mensal_total'],
+                resultados['receita_mensal_atividades'],
+                resultados['lucro_mensal'],
+                resultados.get('payback_meses', 0),
+                resultados.get('roi_percentual', 0),
+                resultados.get('margem_lucro', 0),
+                json.dumps({
+                    'entrada': dados,
+                    'resultados': resultados,
+                    'atividades': processar_atividades(dados.get('atividades', []))
+                }),
+                json.dumps(analise_ia),
+                simulacao_id
             ))
-        return aulas_objetos
-    
-    def _analisar_estado(self, aulas):
-        """Analisa o estado atual da grade"""
-        analise = {
-            'completude': 0,
-            'total_necessario': 0,
-            'total_alocado': len(aulas),
-            'faltas_por_turma': {},
-            'horarios_livres_por_turma': {},
-            'professores_carga': {}
-        }
-        
-        # Calcular total necessário
-        for turma in self.turmas:
-            turma_nome = turma.nome
-            grupo_turma = turma.grupo
             
-            aulas_necessarias = 0
-            for disc in self.disciplinas:
-                if turma_nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
-                    aulas_necessarias += disc.carga_semanal
+            # Remover atividades antigas
+            cursor.execute('DELETE FROM atividades_simulacao WHERE simulacao_id = ?', (simulacao_id,))
             
-            analise['total_necessario'] += aulas_necessarias
+            # Salvar novas atividades
+            for atividade in processar_atividades(dados.get('atividades', [])):
+                cursor.execute('''
+                INSERT INTO atividades_simulacao (
+                    simulacao_id, segmento, nome_atividade, custo_hora_professor,
+                    horas_semanais, semanas_mes, alunos, nao_alunos,
+                    receita_aluno, receita_nao_aluno, custo_material_mensal
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    simulacao_id,
+                    atividade['segmento'],
+                    atividade['nome'],
+                    atividade['custo_hora_professor'],
+                    atividade['horas_semanais'],
+                    atividade['semanas_mes'],
+                    atividade['alunos'],
+                    atividade['nao_alunos'],
+                    atividade['receita_aluno'],
+                    atividade['receita_nao_aluno'],
+                    atividade['custo_material_mensal']
+                ))
             
-            # Contar aulas alocadas
-            aulas_turma = [a for a in aulas if a['turma'] == turma_nome]
+            conn.commit()
+            conn.close()
+            print(f"✅ Simulação #{simulacao_id} atualizada com análise de IA!")
             
-            # Calcular horários livres
-            horarios_turma = obter_horarios_turma(turma_nome)
-            horarios_ocupados = set()
-            for aula in aulas_turma:
-                horarios_ocupados.add((aula['dia'], aula['horario']))
-            
-            horarios_livres = []
-            for dia in self.dias:
-                for horario in horarios_turma:
-                    if (dia, horario) not in horarios_ocupados:
-                        horarios_livres.append((dia, horario))
-            
-            analise['horarios_livres_por_turma'][turma_nome] = horarios_livres
-            
-            # Calcular faltas
-            faltas = []
-            for disc in self.disciplinas:
-                if turma_nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
-                    aulas_disc = len([a for a in aulas_turma if a['disciplina'] == disc.nome])
-                    if aulas_disc < disc.carga_semanal:
-                        faltas.append({
-                            'disciplina': disc.nome,
-                            'faltam': disc.carga_semanal - aulas_disc,
-                            'prioridade': self._calcular_prioridade(disc.nome, grupo_turma)
-                        })
-            
-            analise['faltas_por_turma'][turma_nome] = faltas
+        except Exception as e:
+            print(f"⚠️ Erro ao atualizar no banco: {e}")
         
-        # Calcular completude
-        if analise['total_necessario'] > 0:
-            analise['completude'] = (analise['total_alocado'] / analise['total_necessario']) * 100
+        return jsonify({
+            **resultados,
+            'analise_disponivel': True,
+            'alertas': analise_ia.get('alertas', []),
+            'recomendacoes_count': len(analise_ia.get('recomendacoes', []))
+        })
         
-        # Calcular carga dos professores
-        for professor in self.professores:
-            aulas_prof = len([a for a in aulas if a['professor'] == professor.nome])
-            analise['professores_carga'][professor.nome] = aulas_prof
-        
-        return analise
-    
-    def _calcular_prioridade(self, disciplina, grupo):
-        """Calcula prioridade para alocação"""
-        # Contar professores disponíveis
-        professores_disponiveis = 0
-        for prof in self.professores:
-            if disciplina in prof.disciplinas:
-                if prof.grupo in [grupo, "AMBOS"]:
-                    professores_disponiveis += 1
-        
-        # Quanto menos professores, maior a prioridade
-        return 10 - professores_disponiveis
-    
-    def _estrategia_preencher_buracos(self, aulas, analise):
-        """Preenche buracos óbvios na grade"""
-        nova_grade = aulas.copy()
-        
-        # Ordenar turmas por número de faltas
-        turmas_ordenadas = []
-        for turma_nome, faltas in analise['faltas_por_turma'].items():
-            if faltas:
-                turmas_ordenadas.append((turma_nome, len(faltas)))
-        
-        turmas_ordenadas.sort(key=lambda x: x[1], reverse=True)
-        
-        for turma_nome, _ in turmas_ordenadas:
-            faltas = analise['faltas_por_turma'][turma_nome]
-            horarios_livres = analise['horarios_livres_por_turma'].get(turma_nome, [])
-            
-            # Ordenar faltas por prioridade
-            faltas_ordenadas = sorted(faltas, key=lambda x: x['prioridade'])
-            
-            for falta in faltas_ordenadas:
-                disciplina = falta['disciplina']
-                
-                # Encontrar professores
-                professores_candidatos = []
-                turma_obj = next((t for t in self.turmas if t.nome == turma_nome), None)
-                grupo_turma = turma_obj.grupo if turma_obj else 'A'
-                
-                for prof in self.professores:
-                    if disciplina in prof.disciplinas:
-                        if prof.grupo in [grupo_turma, "AMBOS"]:
-                            professores_candidatos.append(prof)
-                
-                # Ordenar professores por carga
-                professores_candidatos.sort(key=lambda p: analise['professores_carga'].get(p.nome, 0))
-                
-                # Tentar cada horário livre
-                for dia, horario in horarios_livres:
-                    # Verificar se já alocou todas as faltas desta disciplina
-                    if falta['faltam'] <= 0:
-                        break
-                    
-                    # Tentar cada professor
-                    for professor in professores_candidatos:
-                        # Verificar disponibilidade do professor
-                        if self._professor_disponivel(nova_grade, professor.nome, dia, horario):
-                            # Verificar se não está bloqueado
-                            if f"{dia}_{horario}" in professor.horarios_indisponiveis:
-                                continue
-                            
-                            # Alocar aula
-                            nova_grade.append({
-                                'turma': turma_nome,
-                                'disciplina': disciplina,
-                                'professor': professor.nome,
-                                'dia': dia,
-                                'horario': horario,
-                                'segmento': obter_segmento_turma(turma_nome)
-                            })
-                            
-                            # Atualizar contadores
-                            falta['faltam'] -= 1
-                            horarios_livres.remove((dia, horario))
-                            analise['professores_carga'][professor.nome] = analise['professores_carga'].get(professor.nome, 0) + 1
-                            break
-                    
-                    if falta['faltam'] <= 0:
-                        break
-        
-        return nova_grade
-    
-    def _estrategia_rebalancear_professores(self, aulas, analise):
-        """Rebalanceia carga entre professores"""
-        nova_grade = aulas.copy()
-        
-        # Encontrar professores sobrecarregados
-        professores_sobrecarregados = []
-        for nome, carga in analise['professores_carga'].items():
-            professor_obj = next((p for p in self.professores if p.nome == nome), None)
-            if professor_obj:
-                dias_disponiveis = len(professor_obj.disponibilidade)
-                capacidade_maxima = dias_disponiveis * 7 - len(professor_obj.horarios_indisponiveis)
-                
-                if carga > capacidade_maxima * 0.8:  # Mais de 80% da capacidade
-                    professores_sobrecarregados.append((nome, carga, capacidade_maxima))
-        
-        # Ordenar por sobrecarga
-        professores_sobrecarregados.sort(key=lambda x: x[1] / x[2] if x[2] > 0 else 0, reverse=True)
-        
-        for prof_nome, carga, capacidade in professores_sobrecarregados[:3]:  # Apenas os 3 mais sobrecarregados
-            # Encontrar aulas deste professor
-            aulas_prof = [a for a in nova_grade if a['professor'] == prof_nome]
-            
-            for aula in aulas_prof:
-                disciplina = aula['disciplina']
-                turma_nome = aula['turma']
-                
-                # Encontrar professores alternativos
-                professores_alternativos = []
-                turma_obj = next((t for t in self.turmas if t.nome == turma_nome), None)
-                grupo_turma = turma_obj.grupo if turma_obj else 'A'
-                
-                for prof in self.professores:
-                    if prof.nome != prof_nome and disciplina in prof.disciplinas:
-                        if prof.grupo in [grupo_turma, "AMBOS"]:
-                            # Verificar disponibilidade no mesmo horário
-                            if self._professor_disponivel(nova_grade, prof.nome, aula['dia'], aula['horario']):
-                                if f"{aula['dia']}_{aula['horario']}" not in prof.horarios_indisponiveis:
-                                    professores_alternativos.append(prof)
-                
-                # Se encontrou alternativo, transferir
-                if professores_alternativos:
-                    # Escolher o menos carregado
-                    professores_alternativos.sort(key=lambda p: analise['professores_carga'].get(p.nome, 0))
-                    novo_professor = professores_alternativos[0]
-                    
-                    # Atualizar aula
-                    for i, a in enumerate(nova_grade):
-                        if (a['turma'] == turma_nome and a['disciplina'] == disciplina and 
-                            a['dia'] == aula['dia'] and a['horario'] == aula['horario']):
-                            nova_grade[i]['professor'] = novo_professor.nome
-                            break
-                    
-                    # Atualizar cargas
-                    analise['professores_carga'][prof_nome] -= 1
-                    analise['professores_carga'][novo_professor.nome] = analise['professores_carga'].get(novo_professor.nome, 0) + 1
-                    break
-        
-        return nova_grade
-    
-    def _estrategia_permutar_horarios(self, aulas, analise):
-        """Permuta horários para criar espaços"""
-        nova_grade = aulas.copy()
-        
-        # Para cada turma com faltas
-        for turma_nome, faltas in analise['faltas_por_turma'].items():
-            if not faltas:
-                continue
-            
-            # Encontrar aulas desta turma
-            aulas_turma = [a for a in nova_grade if a['turma'] == turma_nome]
-            
-            # Tentar permutar com outras turmas
-            for aula in aulas_turma:
-                # Encontrar outra aula em horário diferente
-                for outra_aula in nova_grade:
-                    if outra_aula['turma'] != turma_nome:
-                        # Tentar trocar horários
-                        if self._permutacao_valida(nova_grade, aula, outra_aula):
-                            # Realizar troca
-                            dia_temp = aula['dia']
-                            horario_temp = aula['horario']
-                            
-                            aula['dia'] = outra_aula['dia']
-                            aula['horario'] = outra_aula['horario']
-                            
-                            outra_aula['dia'] = dia_temp
-                            outra_aula['horario'] = horario_temp
-        
-        return nova_grade
-    
-    def _estrategia_busca_local(self, aulas, analise):
-        """Busca local por melhorias"""
-        melhor_grade = aulas.copy()
-        melhor_completude = analise['completude']
-        
-        for _ in range(50):  # 50 iterações
-            grade_tentativa = melhor_grade.copy()
-            
-            # Aplicar operação aleatória
-            operacao = random.choice(['mover', 'trocar', 'realocar'])
-            
-            if operacao == 'mover' and len(grade_tentativa) > 0:
-                # Mover uma aula para horário livre
-                aula_idx = random.randrange(len(grade_tentativa))
-                aula = grade_tentativa[aula_idx]
-                
-                turma_nome = aula['turma']
-                horarios_livres = analise['horarios_livres_por_turma'].get(turma_nome, [])
-                
-                if horarios_livres:
-                    novo_dia, novo_horario = random.choice(horarios_livres)
-                    
-                    # Verificar se professor está disponível
-                    if self._professor_disponivel(grade_tentativa, aula['professor'], novo_dia, novo_horario):
-                        grade_tentativa[aula_idx]['dia'] = novo_dia
-                        grade_tentativa[aula_idx]['horario'] = novo_horario
-            
-            elif operacao == 'trocar' and len(grade_tentativa) >= 2:
-                # Trocar duas aulas de lugar
-                idx1, idx2 = random.sample(range(len(grade_tentativa)), 2)
-                aula1 = grade_tentativa[idx1]
-                aula2 = grade_tentativa[idx2]
-                
-                # Verificar se troca é válida
-                if (self._professor_disponivel(grade_tentativa, aula1['professor'], aula2['dia'], aula2['horario']) and
-                    self._professor_disponivel(grade_tentativa, aula2['professor'], aula1['dia'], aula1['horario'])):
-                    
-                    # Trocar horários
-                    dia_temp = aula1['dia']
-                    horario_temp = aula1['horario']
-                    
-                    grade_tentativa[idx1]['dia'] = aula2['dia']
-                    grade_tentativa[idx1]['horario'] = aula2['horario']
-                    
-                    grade_tentativa[idx2]['dia'] = dia_temp
-                    grade_tentativa[idx2]['horario'] = horario_temp
-            
-            # Avaliar nova grade
-            nova_analise = self._analisar_estado(grade_tentativa)
-            
-            if nova_analise['completude'] > melhor_completude:
-                melhor_grade = grade_tentativa
-                melhor_completude = nova_analise['completude']
-        
-        return melhor_grade
-    
-    def _professor_disponivel(self, grade, professor_nome, dia, horario):
-        """Verifica se professor está disponível em determinado horário"""
-        for aula in grade:
-            if aula['professor'] == professor_nome:
-                if aula['dia'] == dia and aula['horario'] == horario:
-                    return False
-        return True
-    
-    def _permutacao_valida(self, grade, aula1, aula2):
-        """Verifica se permutação entre duas aulas é válida"""
-        # Verificar disponibilidade dos professores nos novos horários
-        prof1_livre = self._professor_disponivel(grade, aula1['professor'], aula2['dia'], aula2['horario'])
-        prof2_livre = self._professor_disponivel(grade, aula2['professor'], aula1['dia'], aula1['horario'])
-        
-        # Verificar se turmas estão livres nos novos horários
-        turma1_livre = True
-        turma2_livre = True
-        
-        for aula in grade:
-            if aula['turma'] == aula1['turma']:
-                if aula['dia'] == aula2['dia'] and aula['horario'] == aula2['horario']:
-                    turma1_livre = False
-            
-            if aula['turma'] == aula2['turma']:
-                if aula['dia'] == aula1['dia'] and aula['horario'] == aula1['horario']:
-                    turma2_livre = False
-        
-        return prof1_livre and prof2_livre and turma1_livre and turma2_livre
-    
-    def _gerar_grade_do_zero(self):
-        """Gera uma grade completa do zero"""
-        from simple_scheduler import SimpleGradeHoraria
-        
-        simple_grade = SimpleGradeHoraria(
-            turmas=self.turmas,
-            professores=self.professores,
-            disciplinas=self.disciplinas,
-            salas=[]
-        )
-        
-        return simple_grade.gerar_grade()
+    except Exception as e:
+        print(f"Erro na API atualizar com IA: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# ============================================
-# FUNÇÕES ADICIONAIS
-# ============================================
+@app.route('/api/excluir_simulacao/<int:simulacao_id>', methods=['DELETE'])
+def api_excluir_simulacao(simulacao_id):
+    """API para excluir simulação"""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        
+        # Primeiro excluir atividades relacionadas
+        cursor.execute('DELETE FROM atividades_simulacao WHERE simulacao_id = ?', (simulacao_id,))
+        
+        # Depois excluir a simulação
+        cursor.execute('DELETE FROM simulacoes WHERE id = ?', (simulacao_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'success': True, 'message': 'Simulação excluída com sucesso!'})
+        
+    except Exception as e:
+        print(f"Erro ao excluir simulação: {e}")
+        return jsonify({'error': str(e)}), 500
 
-def salvar_grade_como(nome, aulas, config):
-    """Salva uma grade com um nome específico"""
-    if not hasattr(st.session_state, 'grades_salvas'):
-        st.session_state.grades_salvas = {}
+def calcular_resultados(dados: Dict) -> Dict:
+    """Calcula resultados financeiros"""
+    # Processar atividades
+    atividades = processar_atividades(dados.get('atividades', []))
     
-    # Converter para dicionários
-    aulas_dict = []
-    for aula in aulas:
-        if isinstance(aula, Aula):
-            aulas_dict.append({
-                'turma': aula.turma,
-                'disciplina': aula.disciplina,
-                'professor': aula.professor,
-                'dia': aula.dia,
-                'horario': aula.horario,
-                'segmento': aula.segmento if hasattr(aula, 'segmento') else obter_segmento_turma(aula.turma)
-            })
-        elif isinstance(aula, dict):
-            aulas_dict.append(aula)
-        else:
-            aulas_dict.append({
-                'turma': obter_turma_aula(aula),
-                'disciplina': obter_disciplina_aula(aula),
-                'professor': obter_professor_aula(aula),
-                'dia': obter_dia_aula(aula),
-                'horario': obter_horario_aula(aula),
-                'segmento': obter_segmento_aula(aula)
-            })
-    
-    st.session_state.grades_salvas[nome] = {
-        'aulas': aulas_dict,
-        'config': config,
-        'data': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'total_aulas': len(aulas_dict)
+    # Totais
+    totais = {
+        'total_alunos': sum(a['alunos'] for a in atividades),
+        'total_nao_alunos': sum(a['nao_alunos'] for a in atividades),
+        'receita_mensal_atividades': sum(a['receita_mensal'] for a in atividades),
+        'custo_mensal_atividades': sum(a['custo_total_mensal'] for a in atividades),
+        'investimento_inicial': 0,
+        'custo_mensal_geral': 0
     }
     
-    return True
-
-# ============================================
-# MENU DE ABAS
-# ============================================
-abas = st.tabs(["🏠 Início", "📚 Disciplinas", "👩‍🏫 Professores", "🎒 Turmas", "🏫 Salas", "🗓️ Gerar Grade", "👨‍🏫 Grade por Professor", "🔧 Diagnóstico"])
-
-# ============================================
-# ABA INÍCIO
-# ============================================
-with abas[0]:
-    st.header("Dashboard")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Turmas", len(st.session_state.turmas))
-    with col2:
-        st.metric("Professores", len(st.session_state.professores))
-    with col3:
-        st.metric("Disciplinas", len(st.session_state.disciplinas))
-    with col4:
-        st.metric("Salas", len(st.session_state.salas))
-    
-    st.subheader("📊 Estatísticas por Segmento")
-    
-    turmas_efii = [t for t in st.session_state.turmas if obter_segmento_turma(t.nome) == "EF_II"]
-    turmas_em = [t for t in st.session_state.turmas if obter_segmento_turma(t.nome) == "EM"]
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.write("**Ensino Fundamental II**")
-        st.write(f"Turmas: {len(turmas_efii)}")
-        st.write(f"Horário: 07:50 - 12:20")
-        st.write(f"Aulas: 5 por dia + intervalo")
-        
-    with col2:
-        st.write("**Ensino Médio**")
-        st.write(f"Turmas: {len(turmas_em)}")
-        st.write(f"Horário: 07:00 - 13:10")
-        st.write(f"Aulas: 7 por dia + intervalo")
-    
-    st.subheader("📈 Verificação de Carga de Aulas")
-    
-    for turma in st.session_state.turmas:
-        carga_total = 0
-        disciplinas_turma = []
-        grupo_turma = obter_grupo_seguro(turma)
-        segmento = obter_segmento_turma(turma.nome)
-        
-        for disc in st.session_state.disciplinas:
-            if turma.nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
-                carga_total += disc.carga_semanal
-                disciplinas_turma.append(f"{disc.nome} ({disc.carga_semanal}a)")
-        
-        carga_maxima = calcular_carga_maxima(turma.serie)
-        status = "✅" if carga_total == carga_maxima else "⚠️" if carga_total <= carga_maxima else "❌"
-        
-        st.write(f"**{turma.nome}** [{grupo_turma}] ({segmento}): {carga_total}/{carga_maxima} aulas {status}")
-        
-        if disciplinas_turma:
-            st.caption(f"Disciplinas: {', '.join(disciplinas_turma[:3])}{'...' if len(disciplinas_turma) > 3 else ''}")
-        else:
-            st.caption("⚠️ Nenhuma disciplina atribuída")
-    
-    if st.button("💾 Salvar Tudo no Banco"):
-        try:
-            if salvar_tudo():
-                st.success("✅ Todos os dados salvos!")
+    # Custos
+    for categoria, itens in dados.get('custos', {}).items():
+        for item, info in itens.items():
+            valor = info.get('valor', 0)
+            if info.get('mensal'):
+                totais['custo_mensal_geral'] += valor
             else:
-                st.error("❌ Erro ao salvar dados")
-        except Exception as e:
-            st.error(f"❌ Erro ao salvar: {str(e)}")
-
-# ============================================
-# ABA DISCIPLINAS
-# ============================================
-with abas[1]:
-    st.header("📚 Disciplinas")
+                totais['investimento_inicial'] += valor
     
-    grupo_filtro = st.selectbox("Filtrar por Grupo", ["Todos", "A", "B"], key="filtro_disc")
+    # Totais finais
+    totais['total_participantes'] = totais['total_alunos'] + totais['total_nao_alunos']
+    totais['custo_mensal_total'] = totais['custo_mensal_atividades'] + totais['custo_mensal_geral']
+    totais['lucro_mensal'] = totais['receita_mensal_atividades'] - totais['custo_mensal_total']
     
-    with st.expander("➕ Adicionar Nova Disciplina", expanded=False):
-        with st.form("add_disc"):
-            col1, col2 = st.columns(2)
-            with col1:
-                nome = st.text_input("Nome da Disciplina*")
-                carga = st.number_input("Carga Semanal*", 1, 10, 3)
-                tipo = st.selectbox("Tipo*", ["pesada", "media", "leve", "pratica"])
-            with col2:
-                turmas_opcoes = [t.nome for t in st.session_state.turmas]
-                turmas_selecionadas = st.multiselect("Turmas*", turmas_opcoes)
-                grupo = st.selectbox("Grupo*", ["A", "B"])
-                cor_fundo = st.color_picker("Cor de Fundo", "#4A90E2")
-                cor_fonte = st.color_picker("Cor da Fonte", "#FFFFFF")
-            
-            if st.form_submit_button("✅ Adicionar Disciplina"):
-                if nome and turmas_selecionadas:
-                    try:
-                        nova_disciplina = Disciplina(
-                            nome, carga, tipo, turmas_selecionadas, grupo, cor_fundo, cor_fonte
-                        )
-                        st.session_state.disciplinas.append(nova_disciplina)
-                        if salvar_tudo():
-                            st.success(f"✅ Disciplina '{nome}' adicionada!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Erro ao adicionar disciplina: {str(e)}")
-                else:
-                    st.error("❌ Preencha todos os campos obrigatórios (*)")
+    # Margem e ROI
+    totais['margem_lucro'] = (totais['lucro_mensal'] / totais['receita_mensal_atividades'] * 100) if totais['receita_mensal_atividades'] > 0 else 0
     
-    st.subheader("📋 Lista de Disciplinas")
-    
-    disciplinas_exibir = st.session_state.disciplinas
-    if grupo_filtro != "Todos":
-        disciplinas_exibir = [d for d in st.session_state.disciplinas if obter_grupo_seguro(d) == grupo_filtro]
-    
-    if not disciplinas_exibir:
-        st.info("📝 Nenhuma disciplina cadastrada.")
-    
-    for disc in disciplinas_exibir:
-        with st.expander(f"📖 {disc.nome} [{obter_grupo_seguro(disc)}]", expanded=False):
-            with st.form(f"edit_disc_{disc.id}"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    novo_nome = st.text_input("Nome", disc.nome, key=f"nome_{disc.id}")
-                    nova_carga = st.number_input("Carga Semanal", 1, 10, disc.carga_semanal, key=f"carga_{disc.id}")
-                    novo_tipo = st.selectbox(
-                        "Tipo", 
-                        ["pesada", "media", "leve", "pratica"],
-                        index=["pesada", "media", "leve", "pratica"].index(disc.tipo),
-                        key=f"tipo_{disc.id}"
-                    )
-                with col2:
-                    turmas_opcoes = [t.nome for t in st.session_state.turmas]
-                    turmas_selecionadas = st.multiselect(
-                        "Turmas", 
-                        turmas_opcoes,
-                        default=disc.turmas,
-                        key=f"turmas_{disc.id}"
-                    )
-                    novo_grupo = st.selectbox(
-                        "Grupo", 
-                        ["A", "B"],
-                        index=0 if obter_grupo_seguro(disc) == "A" else 1,
-                        key=f"grupo_{disc.id}"
-                    )
-                    nova_cor_fundo = st.color_picker("Cor de Fundo", disc.cor_fundo, key=f"cor_fundo_{disc.id}")
-                    nova_cor_fonte = st.color_picker("Cor da Fonte", disc.cor_fonte, key=f"cor_fonte_{disc.id}")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.form_submit_button("💾 Salvar Alterações"):
-                        if novo_nome and turmas_selecionadas:
-                            try:
-                                disc.nome = novo_nome
-                                disc.carga_semanal = nova_carga
-                                disc.tipo = novo_tipo
-                                disc.turmas = turmas_selecionadas
-                                disc.grupo = novo_grupo
-                                disc.cor_fundo = nova_cor_fundo
-                                disc.cor_fonte = nova_cor_fonte
-                                
-                                if salvar_tudo():
-                                    st.success("✅ Disciplina atualizada!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Erro ao atualizar: {str(e)}")
-                        else:
-                            st.error("❌ Preencha todos os campos obrigatórios")
-                
-                with col2:
-                    if st.form_submit_button("🗑️ Excluir Disciplina", type="secondary"):
-                        try:
-                            st.session_state.disciplinas.remove(disc)
-                            if salvar_tudo():
-                                st.success("✅ Disciplina excluída!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Erro ao excluir: {str(e)}")
-
-# ============================================
-# ABA PROFESSORES
-# ============================================
-with abas[2]:
-    st.header("👩‍🏫 Professores")
-    
-    grupo_filtro = st.selectbox("Filtrar por Grupo", ["Todos", "A", "B", "AMBOS"], key="filtro_prof")
-    disc_nomes = [d.nome for d in st.session_state.disciplinas]
-    
-    with st.expander("➕ Adicionar Novo Professor", expanded=False):
-        with st.form("add_prof"):
-            col1, col2 = st.columns(2)
-            with col1:
-                nome = st.text_input("Nome do Professor*")
-                disciplinas = st.multiselect("Disciplinas*", disc_nomes)
-                grupo = st.selectbox("Grupo*", ["A", "B", "AMBOS"])
-            with col2:
-                disponibilidade = st.multiselect("Dias Disponíveis*", DIAS_SEMANA, default=DIAS_SEMANA)
-                st.write("**Horários Indisponíveis:**")
-                
-                horarios_indisponiveis = []
-                for dia in DIAS_SEMANA:
-                    with st.container():
-                        st.write(f"**{dia.upper()}:**")
-                        horarios_cols = st.columns(4)
-                        horarios_todos = list(range(1, 8))
-                        for i, horario in enumerate(horarios_todos):
-                            with horarios_cols[i % 4]:
-                                if st.checkbox(f"{horario}º", key=f"add_{dia}_{horario}"):
-                                    horarios_indisponiveis.append(f"{dia}_{horario}")
-            
-            if st.form_submit_button("✅ Adicionar Professor"):
-                if nome and disciplinas and disponibilidade:
-                    try:
-                        disponibilidade_completa = converter_disponibilidade_para_completo(disponibilidade)
-                        
-                        novo_professor = Professor(
-                            nome, 
-                            disciplinas, 
-                            disponibilidade_completa,
-                            grupo,
-                            horarios_indisponiveis
-                        )
-                        st.session_state.professores.append(novo_professor)
-                        if salvar_tudo():
-                            st.success(f"✅ Professor '{nome}' adicionada!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Erro ao adicionar professor: {str(e)}")
-                else:
-                    st.error("❌ Preencha todos os campos obrigatórios (*)")
-    
-    st.subheader("📋 Lista de Professores")
-    
-    professores_exibir = st.session_state.professores
-    if grupo_filtro != "Todos":
-        professores_exibir = [p for p in st.session_state.professores if obter_grupo_seguro(p) == grupo_filtro]
-    
-    if not professores_exibir:
-        st.info("📝 Nenhum professor cadastrada.")
-    
-    for prof in professores_exibir:
-        with st.expander(f"👨‍🏫 {prof.nome} [{obter_grupo_seguro(prof)}]", expanded=False):
-            disciplinas_validas = [d for d in prof.disciplinas if d in disc_nomes]
-            
-            with st.form(f"edit_prof_{prof.id}"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    novo_nome = st.text_input("Nome", prof.nome, key=f"nome_prof_{prof.id}")
-                    novas_disciplinas = st.multiselect(
-                        "Disciplinas", 
-                        disc_nomes, 
-                        default=disciplinas_validas,
-                        key=f"disc_prof_{prof.id}"
-                    )
-                    novo_grupo = st.selectbox(
-                        "Grupo", 
-                        ["A", "B", "AMBOS"],
-                        index=["A", "B", "AMBOS"].index(obter_grupo_seguro(prof)),
-                        key=f"grupo_prof_{prof.id}"
-                    )
-                with col2:
-                    disponibilidade_convertida = converter_disponibilidade_para_semana(prof.disponibilidade)
-                    
-                    nova_disponibilidade = st.multiselect(
-                        "Dias Disponíveis", 
-                        DIAS_SEMANA, 
-                        default=disponibilidade_convertida,
-                        key=f"disp_prof_{prof.id}"
-                    )
-                    
-                    st.write("**Horários Indisponíveis:**")
-                    novos_horarios_indisponiveis = []
-                    horarios_todos = list(range(1, 8))
-                    for dia in DIAS_SEMANA:
-                        with st.container():
-                            st.write(f"**{dia.upper()}:**")
-                            horarios_cols = st.columns(4)
-                            for i, horario in enumerate(horarios_todos):
-                                with horarios_cols[i % 4]:
-                                    checked = False
-                                    horario_str = f"{dia}_{horario}"
-                                    if hasattr(prof, 'horarios_indisponiveis'):
-                                        if isinstance(prof.horarios_indisponiveis, (list, set)):
-                                            checked = horario_str in prof.horarios_indisponiveis
-                                    
-                                    if st.checkbox(
-                                        f"{horario}º", 
-                                        value=checked,
-                                        key=f"edit_{prof.id}_{dia}_{horario}"
-                                    ):
-                                        novos_horarios_indisponiveis.append(horario_str)
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.form_submit_button("💾 Salvar Alterações"):
-                        if novo_nome and novas_disciplinas and nova_disponibilidade:
-                            try:
-                                prof.nome = novo_nome
-                                prof.disciplinas = novas_disciplinas
-                                prof.grupo = novo_grupo
-                                
-                                disponibilidade_completa = converter_disponibilidade_para_completo(nova_disponibilidade)
-                                
-                                prof.disponibilidade = disponibilidade_completa
-                                prof.horarios_indisponiveis = novos_horarios_indisponiveis
-                                
-                                if salvar_tudo():
-                                    st.success("✅ Professor atualizado!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Erro ao atualizar: {str(e)}")
-                        else:
-                            st.error("❌ Preencha todos os campos obrigatórios")
-                
-                with col2:
-                    if st.form_submit_button("🗑️ Excluir Professor", type="secondary"):
-                        try:
-                            st.session_state.professores.remove(prof)
-                            if salvar_tudo():
-                                st.success("✅ Professor excluído!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Erro ao excluir: {str(e)}")
-
-# ============================================
-# ABA TURMAS
-# ============================================
-with abas[3]:
-    st.header("🎒 Turmas")
-    
-    grupo_filtro = st.selectbox("Filtrar por Grupo", ["Todos", "A", "B"], key="filtro_turma")
-    
-    with st.expander("➕ Adicionar Nova Turma", expanded=False):
-        with st.form("add_turma"):
-            col1, col2 = st.columns(2)
-            with col1:
-                nome = st.text_input("Nome da Turma* (ex: 8anoA)")
-                serie = st.text_input("Série* (ex: 8ano)")
-            with col2:
-                turno = st.selectbox("Turno*", ["manha"], disabled=True)
-                grupo = st.selectbox("Grupo*", ["A", "B"])
-            
-            segmento = "EM" if serie and 'em' in serie.lower() else "EF_II"
-            st.info(f"💡 Segmento: {segmento} - {calcular_carga_maxima(serie)}h semanais máximas")
-            
-            if st.form_submit_button("✅ Adicionar Turma"):
-                if nome and serie:
-                    try:
-                        nova_turma = Turma(nome, serie, "manha", grupo, segmento)
-                        st.session_state.turmas.append(nova_turma)
-                        if salvar_tudo():
-                            st.success(f"✅ Turma '{nome}' adicionada!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Erro ao adicionar turma: {str(e)}")
-                else:
-                    st.error("❌ Preencha todos os campos obrigatórios (*)")
-    
-    st.subheader("📋 Lista de Turmas")
-    
-    turmas_exibir = st.session_state.turmas
-    if grupo_filtro != "Todos":
-        turmas_exibir = [t for t in st.session_state.turmas if obter_grupo_seguro(t) == grupo_filtro]
-    
-    if not turmas_exibir:
-        st.info("📝 Nenhuma turma cadastrada.")
-    
-    for turma in turmas_exibir:
-        with st.expander(f"🎒 {turma.nome} [{obter_grupo_seguro(turma)}]", expanded=False):
-            with st.form(f"edit_turma_{turma.id}"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    novo_nome = st.text_input("Nome", turma.nome, key=f"nome_turma_{turma.id}")
-                    nova_serie = st.text_input("Série", turma.serie, key=f"serie_turma_{turma.id}")
-                with col2:
-                    st.text_input("Turno", "manha", disabled=True, key=f"turno_turma_{turma.id}")
-                    novo_grupo = st.selectbox(
-                        "Grupo", 
-                        ["A", "B"],
-                        index=0 if obter_grupo_seguro(turma) == "A" else 1,
-                        key=f"grupo_turma_{turma.id}"
-                    )
-                
-                segmento = obter_segmento_turma(turma.nome)
-                horarios = obter_horarios_turma(turma.nome)
-                st.write(f"**Segmento:** {segmento}")
-                st.write(f"**Horários disponíveis:** {len(horarios)} períodos")
-                
-                grupo_turma = obter_grupo_seguro(turma)
-                carga_atual = 0
-                disciplinas_turma = []
-                
-                for disc in st.session_state.disciplinas:
-                    if turma.nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
-                        carga_atual += disc.carga_semanal
-                        disciplinas_turma.append(disc.nome)
-                
-                carga_maxima = calcular_carga_maxima(turma.serie)
-                st.write(f"**Carga horária atual:** {carga_atual}/{carga_maxima}h")
-                if disciplinas_turma:
-                    st.caption(f"Disciplinas: {', '.join(disciplinas_turma[:3])}{'...' if len(disciplinas_turma) > 3 else ''}")
-                else:
-                    st.caption("⚠️ Nenhuma disciplina atribuída")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.form_submit_button("💾 Salvar Alterações"):
-                        if novo_nome and nova_serie:
-                            try:
-                                turma.nome = novo_nome
-                                turma.serie = nova_serie
-                                turma.grupo = novo_grupo
-                                
-                                if salvar_tudo():
-                                    st.success("✅ Turma atualizada!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Erro ao atualizar: {str(e)}")
-                        else:
-                            st.error("❌ Preencha todos os campos obrigatórios")
-                
-                with col2:
-                    if st.form_submit_button("🗑️ Excluir Turma", type="secondary"):
-                        try:
-                            st.session_state.turmas.remove(turma)
-                            if salvar_tudo():
-                                st.success("✅ Turma excluída!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Erro ao excluir: {str(e)}")
-
-# ============================================
-# ABA SALAS
-# ============================================
-with abas[4]:
-    st.header("🏫 Salas")
-    
-    with st.expander("➕ Adicionar Nova Sala", expanded=False):
-        with st.form("add_sala"):
-            col1, col2 = st.columns(2)
-            with col1:
-                nome = st.text_input("Nome da Sala*")
-                capacidade = st.number_input("Capacidade*", 1, 100, 30)
-            with col2:
-                tipo = st.selectbox("Tipo*", ["normal", "laboratório", "auditório"])
-            
-            if st.form_submit_button("✅ Adicionar Sala"):
-                if nome:
-                    try:
-                        nova_sala = Sala(nome, capacidade, tipo)
-                        st.session_state.salas.append(nova_sala)
-                        if salvar_tudo():
-                            st.success(f"✅ Sala '{nome}' adicionada!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ Erro ao adicionar sala: {str(e)}")
-                else:
-                    st.error("❌ Preencha todos os campos obrigatórios (*)")
-    
-    st.subheader("📋 Lista de Salas")
-    
-    if not st.session_state.salas:
-        st.info("📝 Nenhuma sala cadastrada.")
-    
-    for sala in st.session_state.salas:
-        with st.expander(f"🏫 {sala.nome}", expanded=False):
-            with st.form(f"edit_sala_{sala.id}"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    novo_nome = st.text_input("Nome", sala.nome, key=f"nome_sala_{sala.id}")
-                    nova_capacidade = st.number_input("Capacidade", 1, 100, sala.capacidade, key=f"cap_sala_{sala.id}")
-                with col2:
-                    novo_tipo = st.selectbox(
-                        "Tipo", 
-                        ["normal", "laboratório", "auditório"],
-                        index=["normal", "laboratório", "auditório"].index(sala.tipo),
-                        key=f"tipo_sala_{sala.id}"
-                    )
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.form_submit_button("💾 Salvar Alterações"):
-                        if novo_nome:
-                            try:
-                                sala.nome = novo_nome
-                                sala.capacidade = nova_capacidade
-                                sala.tipo = novo_tipo
-                                
-                                if salvar_tudo():
-                                    st.success("✅ Sala atualizada!")
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"❌ Erro ao atualizar: {str(e)}")
-                        else:
-                            st.error("❌ Preencha todos os campos obrigatórios")
-                
-                with col2:
-                    if st.form_submit_button("🗑️ Excluir Sala", type="secondary"):
-                        try:
-                            st.session_state.salas.remove(sala)
-                            if salvar_tudo():
-                                st.success("✅ Sala excluída!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"❌ Erro ao excluir: {str(e)}")
-
-# ============================================
-# ABA GERAR GRADE - COM LAYOUT VISUAL RESTAURADO
-# ============================================
-with abas[5]:
-    st.header("🗓️ Gerar Grade Horária")
-    
-    st.subheader("🎯 Configurações da Grade")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        tipo_grade = st.selectbox(
-            "Tipo de Grade",
-            [
-                "Grade Completa - Todas as Turmas",
-                "Grade por Grupo A",
-                "Grade por Grupo B", 
-                "Grade por Turma Específica"
-            ]
-        )
-        
-        if tipo_grade == "Grade por Turma Específica":
-            turmas_opcoes = [t.nome for t in st.session_state.turmas]
-            if turmas_opcoes:
-                turma_selecionada = st.selectbox("Selecionar Turma", turmas_opcoes)
-            else:
-                turma_selecionada = None
-    
-    with col2:
-        tipo_algoritmo = st.selectbox(
-            "Algoritmo de Geração",
-            ["Algoritmo Simples (Rápido)"]
-        )
-        
-        tipo_completador = st.selectbox(
-            "Algoritmo de Completude",
-            ["Completador Básico", "Completador Avançado (Recomendado)"],
-            help="O completador avançado usa múltiplas estratégias para tentar completar grades incompletas"
-        )
-        
-        st.info("📅 **EM: 07:00-13:10 (7 períodos)**")
-        st.info("📅 **EF II: 07:50-12:20 (5 períodos)**")
-    
-    st.subheader("📊 Pré-análise de Viabilidade")
-    
-    if tipo_grade == "Grade por Grupo A":
-        turmas_filtradas = [t for t in st.session_state.turmas if obter_grupo_seguro(t) == "A"]
-        grupo_texto = "Grupo A"
-    elif tipo_grade == "Grade por Grupo B":
-        turmas_filtradas = [t for t in st.session_state.turmas if obter_grupo_seguro(t) == "B"]
-        grupo_texto = "Grupo B"
-    elif tipo_grade == "Grade por Turma Específica" and turma_selecionada:
-        turmas_filtradas = [t for t in st.session_state.turmas if t.nome == turma_selecionada]
-        grupo_texto = f"Turma {turma_selecionada}"
+    meses_analise = dados.get('meses_analise', 24)
+    if totais['lucro_mensal'] > 0 and totais['investimento_inicial'] > 0:
+        totais['payback_meses'] = totais['investimento_inicial'] / totais['lucro_mensal']
+        totais['roi_percentual'] = ((totais['lucro_mensal'] * meses_analise) / totais['investimento_inicial']) * 100
     else:
-        turmas_filtradas = st.session_state.turmas
-        grupo_texto = "Todas as Turmas"
+        totais['payback_meses'] = 0
+        totais['roi_percentual'] = 0
     
-    if tipo_grade == "Grade por Grupo A":
-        disciplinas_filtradas = [d for d in st.session_state.disciplinas if obter_grupo_seguro(d) == "A"]
-    elif tipo_grade == "Grade por Grupo B":
-        disciplinas_filtradas = [d for d in st.session_state.disciplinas if obter_grupo_seguro(d) == "B"]
-    else:
-        disciplinas_filtradas = st.session_state.disciplinas
+    totais['meses_analise'] = meses_analise
+    totais['total_atividades'] = len(atividades)
     
-    total_aulas = 0
-    aulas_por_turma = {}
-    problemas_carga = []
-    
-    for turma in turmas_filtradas:
-        aulas_turma = 0
-        grupo_turma = obter_grupo_seguro(turma)
-        
-        for disc in disciplinas_filtradas:
-            disc_grupo = obter_grupo_seguro(disc)
-            if turma.nome in disc.turmas and disc_grupo == grupo_turma:
-                aulas_turma += disc.carga_semanal
-                total_aulas += disc.carga_semanal
-        
-        aulas_por_turma[turma.nome] = aulas_turma
-        
-        carga_maxima = calcular_carga_maxima(turma.serie)
-        if aulas_turma != carga_maxima:
-            status = "✅" if aulas_turma == carga_maxima else "⚠️" if aulas_turma <= carga_maxima else "❌"
-            problemas_carga.append(f"{turma.nome} [{grupo_turma}]: {aulas_turma}h {status} {carga_maxima}h máximo")
-    
-    capacidade_total = 0
-    for turma in turmas_filtradas:
-        horarios_turma = obter_horarios_turma(turma.nome)
-        capacidade_total += len(DIAS_SEMANA) * len(horarios_turma)
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Turmas", len(turmas_filtradas))
-    with col2:
-        st.metric("Aulas Necessárias", total_aulas)
-    with col3:
-        st.metric("Capacidade Disponível", capacidade_total)
-    
-    if problemas_carga:
-        st.warning("⚠️ Observações sobre carga horária:")
-        for problema in problemas_carga:
-            st.write(f"- {problema}")
-    
-    if total_aulas == 0:
-        st.error("❌ Nenhuma aula para alocar! Verifique as disciplinas.")
-    elif total_aulas > capacidade_total:
-        st.error("❌ Capacidade insuficiente! Reduza a carga horária.")
-    else:
-        st.success("✅ Pronto para gerar grade!")
-        
-        if st.button("🚀 Gerar Grade Horária", type="primary", width='stretch'):
-            if not turmas_filtradas:
-                st.error("❌ Nenhuma turma selecionada!")
-            elif not disciplinas_filtradas:
-                st.error("❌ Nenhuma disciplina disponível!")
-            else:
-                with st.spinner(f"Gerando grade para {grupo_texto}..."):
-                    try:
-                        if tipo_grade == "Grade por Grupo A":
-                            professores_filtrados = [p for p in st.session_state.professores 
-                                                   if obter_grupo_seguro(p) in ["A", "AMBOS"]]
-                        elif tipo_grade == "Grade por Grupo B":
-                            professores_filtrados = [p for p in st.session_state.professores 
-                                                   if obter_grupo_seguro(p) in ["B", "AMBOS"]]
-                        else:
-                            professores_filtrados = st.session_state.professores
-                        
-                        # Gerar grade
-                        if not ALGORITMOS_DISPONIVEIS:
-                            st.error("❌ Algoritmo de geração não disponível!")
-                            st.stop()
-                        
-                        simple_grade = SimpleGradeHoraria(
-                            turmas=turmas_filtradas,
-                            professores=professores_filtrados,
-                            disciplinas=disciplinas_filtradas,
-                            salas=st.session_state.salas
-                        )
-                        aulas = simple_grade.gerar_grade()
-                        metodo = "Algoritmo Simples"
-                        
-                        # Filtrar por turma específica se necessário
-                        if tipo_grade == "Grade por Turma Específica" and turma_selecionada:
-                            aulas = [a for a in aulas if obter_turma_aula(a) == turma_selecionada]
-                        
-                        # Salvar no estado da sessão
-                        st.session_state.aulas = aulas
-                        
-                        if salvar_tudo():
-                            st.success(f"✅ Grade {grupo_texto} gerada com {metodo}! ({len(aulas)} aulas)")
-                        
-                        # ============================================
-                        # DIAGNÓSTICO E COMPLETUDE DA GRADE
-                        # ============================================
-                        
-                        if aulas:
-                            st.subheader("🔍 DIAGNÓSTICO DA GRADE")
-                            
-                            # Executar diagnóstico
-                            diagnostico = diagnosticar_grade(turmas_filtradas, professores_filtrados, disciplinas_filtradas, aulas)
-                            
-                            # Mostrar status
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Status", diagnostico['status'])
-                            with col2:
-                                st.metric("Completude", f"{diagnostico['completude']}%")
-                            with col3:
-                                st.metric("Aulas", f"{diagnostico['estatisticas']['total_alocado']}/{diagnostico['estatisticas']['total_necessario']}")
-                            
-                            # Botão para tentar completar automaticamente
-                            if diagnostico['completude'] < 100:
-                                st.warning(f"⚠️ **Grade incompleta!** Faltam {diagnostico['estatisticas']['faltam']} aulas.")
-                                
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    if st.button("🔧 TENTAR COMPLETAR GRADE", type="primary", use_container_width=True):
-                                        with st.spinner("Tentando completar a grade..."):
-                                            if tipo_completador == "Completador Avançado (Recomendado)":
-                                                completador = CompletadorDeGradeAvancado(turmas_filtradas, professores_filtrados, disciplinas_filtradas)
-                                            else:
-                                                # Completador básico (versão simplificada)
-                                                class CompletadorDeGradeBasico:
-                                                    def __init__(self, turmas, professores, disciplinas):
-                                                        self.turmas = turmas
-                                                        self.professores = professores
-                                                        self.disciplinas = disciplinas
-                                                        self.dias = ['segunda', 'terca', 'quarta', 'quinta', 'sexta']
-                                                    
-                                                    def completar_grade(self, aulas):
-                                                        return aulas  # Básico: não faz nada
-                                                
-                                                completador = CompletadorDeGradeBasico(turmas_filtradas, professores_filtrados, disciplinas_filtradas)
-                                            
-                                            aulas_completas = completador.completar_grade(aulas)
-                                            
-                                            # Verificar se melhorou
-                                            novo_diagnostico = diagnosticar_grade(turmas_filtradas, professores_filtrados, disciplinas_filtradas, aulas_completas)
-                                            
-                                            if novo_diagnostico['completude'] > diagnostico['completude']:
-                                                st.session_state.aulas = aulas_completas
-                                                st.success(f"✅ Melhorado para {novo_diagnostico['completude']}%! Atualize a página para ver a nova grade.")
-                                                st.rerun()
-                                            else:
-                                                st.error("❌ Não foi possível melhorar a grade automaticamente.")
-                                
-                                with col2:
-                                    # Botão para salvar grade atual
-                                    nome_grade = st.text_input("Nome para salvar esta grade:", value=f"Grade_{grupo_texto}_{datetime.now().strftime('%H%M')}")
-                                    if st.button("💾 SALVAR GRADE", type="secondary", use_container_width=True):
-                                        if salvar_grade_como(nome_grade, aulas, {'tipo': tipo_grade, 'algoritmo': metodo}):
-                                            st.success(f"✅ Grade '{nome_grade}' salva!")
-                            
-                            # Mostrar problemas e sugestões
-                            if diagnostico['problemas']:
-                                with st.expander("📋 PROBLEMAS DETECTADOS", expanded=True):
-                                    for problema in diagnostico['problemas'][:5]:
-                                        st.markdown(problema)
-                            
-                            if diagnostico['sugestoes']:
-                                with st.expander("💡 SUGESTÕES PARA COMPLETAR", expanded=True):
-                                    for sugestao in diagnostico['sugestoes'][:5]:
-                                        st.markdown(sugestao)
-                            
-                            # Detalhes por turma
-                            with st.expander("📊 DETALHES POR TURMA"):
-                                for turma_nome, info in diagnostico['detalhes_por_turma'].items():
-                                    status = "✅" if info['completude'] == 100 else "⚠️" if info['completude'] >= 80 else "❌"
-                                    st.write(f"{status} **{turma_nome}** ({info['segmento']}): {info['alocadas']}/{info['necessarias']} aulas ({info['completude']:.1f}%)")
-                                    
-                                    if info['faltas_disciplinas']:
-                                        st.caption(f"Faltam: {', '.join(info['faltas_disciplinas'])}")
-                            
-                            # Professores saturados
-                            if diagnostico['professores_saturados']:
-                                with st.expander("👨‍🏫 PROFESSORES SATURADOS"):
-                                    for prof in diagnostico['professores_saturados']:
-                                        st.write(f"⚠️ **{prof['nome']}**: {prof['aulas']}/{prof['capacidade']} aulas (máximo: {prof['dias_disponiveis']} dias × 7 - {prof['horarios_bloqueados']} bloqueios)")
-                        
-                        # ============================================
-                        # VISUALIZAÇÃO DA GRADE HORÁRIA (COM LAYOUT VISUAL)
-                        # ============================================
-                        if aulas:
-                            st.subheader("📅 Visualização da Grade Horária")
-                            
-                            # Usar função segura para obter turmas
-                            turmas_com_aulas = []
-                            for a in aulas:
-                                turma = obter_turma_aula(a)
-                                if turma and turma not in turmas_com_aulas:
-                                    turmas_com_aulas.append(turma)
-                            
-                            for turma_nome in turmas_com_aulas:
-                                st.write(f"#### 🎒 Grade da Turma: {turma_nome}")
-                                
-                                # Filtrar aulas da turma
-                                aulas_turma = [a for a in aulas if obter_turma_aula(a) == turma_nome]
-                                
-                                # Determinar segmento e períodos
-                                segmento = obter_segmento_turma(turma_nome)
-                                if segmento == "EM":
-                                    periodos = list(range(1, 8))  # 1-7
-                                else:
-                                    periodos = list(range(1, 6))  # 1-5
-                                
-                                # Dias da semana
-                                dias_ordenados = ["segunda", "terca", "quarta", "quinta", "sexta"]
-                                
-                                # CSS para estilizar a tabela
-                                st.markdown("""
-                                <style>
-                                .grade-table {
-                                    width: 100%;
-                                    border-collapse: collapse;
-                                    margin: 10px 0;
-                                    font-size: 14px;
-                                }
-                                .grade-table th, .grade-table td {
-                                    border: 1px solid #ddd;
-                                    padding: 8px;
-                                    text-align: center;
-                                    vertical-align: middle;
-                                }
-                                .grade-table th {
-                                    background-color: #4A90E2;
-                                    color: white;
-                                    font-weight: bold;
-                                }
-                                .aula-cell {
-                                    background-color: #e8f5e9;
-                                    color: #2e7d32;
-                                    font-size: 14px;
-                                    border-radius: 4px;
-                                    padding: 10px;
-                                }
-                                .livre-cell {
-                                    background-color: #f5f5f5;
-                                    color: #999;
-                                    font-style: italic;
-                                }
-                                .intervalo-row {
-                                    background-color: #e3f2fd;
-                                    color: #1565c0;
-                                    font-weight: bold;
-                                    text-align: center;
-                                }
-                                .disciplina {
-                                    font-weight: bold;
-                                    font-size: 14px;
-                                    margin-bottom: 2px;
-                                }
-                                .professor {
-                                    font-size: 12px;
-                                    color: #666;
-                                    font-style: italic;
-                                }
-                                .horario-cell {
-                                    background-color: #f0f7ff;
-                                    font-weight: bold;
-                                }
-                                </style>
-                                """, unsafe_allow_html=True)
-                                
-                                # Construir tabela HTML
-                                table_html = """<table class='grade-table'>
-                                <tr>
-                                <th>Horário</th>
-                                <th>Segunda</th>
-                                <th>Terça</th>
-                                <th>Quarta</th>
-                                <th>Quinta</th>
-                                <th>Sexta</th>
-                                </tr>"""
-                                
-                                # Adicionar períodos de aula
-                                for periodo in periodos:
-                                    horario_real = obter_horario_real(turma_nome, periodo)
-                                    table_html += f"<tr><td class='horario-cell'><strong>{horario_real}</strong></td>"
-                                    
-                                    for dia in dias_ordenados:
-                                        # Procurar aula
-                                        aula_encontrada = None
-                                        for aula in aulas_turma:
-                                            if obter_dia_aula(aula) == dia and obter_horario_aula(aula) == periodo:
-                                                aula_encontrada = aula
-                                                break
-                                        
-                                        if aula_encontrada:
-                                            # Obter dados da aula
-                                            disciplina = str(obter_disciplina_aula(aula_encontrada)).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                                            professor = str(obter_professor_aula(aula_encontrada)).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                                            
-                                            # Encontrar cor da disciplina
-                                            cor_fundo = "#e8f5e9"  # Default
-                                            cor_fonte = "#2e7d32"  # Default
-                                            for disc in st.session_state.disciplinas:
-                                                if disc.nome == disciplina:
-                                                    if hasattr(disc, 'cor_fundo') and disc.cor_fundo:
-                                                        cor_fundo = disc.cor_fundo
-                                                    if hasattr(disc, 'cor_fonte') and disc.cor_fonte:
-                                                        cor_fonte = disc.cor_fonte
-                                                    break
-                                            
-                                            table_html += f"""<td class='aula-cell' style='background-color: {cor_fundo}; color: {cor_fonte};'>
-                                            <div class='disciplina'>{disciplina}</div>
-                                            <div class='professor'>{professor}</div>
-                                            </td>"""
-                                        else:
-                                            table_html += f"<td class='livre-cell'>LIVRE</td>"
-                                    
-                                    table_html += "</tr>"
-                                    
-                                    # Adicionar linha do intervalo no lugar correto
-                                    if segmento == "EM" and periodo == 3:
-                                        table_html += """<tr class='intervalo-row'>
-                                        <td colspan='6'>🕛 INTERVALO: 09:30 - 09:50</td>
-                                        </tr>"""
-                                    elif segmento == "EF_II" and periodo == 2:
-                                        table_html += """<tr class='intervalo-row'>
-                                        <td colspan='6'>🕛 INTERVALO: 09:30 - 09:50</td>
-                                        </tr>"""
-                                
-                                table_html += "</table>"
-                                
-                                # Mostrar tabela
-                                st.markdown(table_html, unsafe_allow_html=True)
-                                
-                                # Resumo
-                                st.caption(f"✅ {len(aulas_turma)} aulas alocadas | Segmento: {segmento}")
-                                st.markdown("---")
-                            
-                            # Dataframe detalhado
-                            df_aulas = pd.DataFrame([
-                                {
-                                    "Turma": obter_turma_aula(a),
-                                    "Disciplina": obter_disciplina_aula(a), 
-                                    "Professor": obter_professor_aula(a),
-                                    "Dia": obter_dia_aula(a),
-                                    "Horário": f"{obter_horario_aula(a)}º ({obter_horario_real(obter_turma_aula(a), obter_horario_aula(a))})",
-                                    "Segmento": obter_segmento_aula(a) or obter_segmento_turma(obter_turma_aula(a))
-                                }
-                                for a in aulas
-                            ])
-                            
-                            df_aulas = df_aulas.sort_values(["Turma", "Dia", "Horário"])
-                            st.subheader("📊 Lista Detalhada das Aulas")
-                            st.dataframe(df_aulas, width='stretch')
-                            
-                            # Download
-                            try:
-                                output = io.BytesIO()
-                                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                                    df_aulas.to_excel(writer, sheet_name="Grade_Completa", index=False)
-                                
-                                st.download_button(
-                                    "📥 Baixar Grade em Excel",
-                                    output.getvalue(),
-                                    f"grade_{grupo_texto.replace(' ', '_')}.xlsx",
-                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                )
-                            except ImportError:
-                                csv = df_aulas.to_csv(index=False)
-                                st.download_button(
-                                    "📥 Baixar Grade em CSV",
-                                    csv,
-                                    f"grade_{grupo_texto.replace(' ', '_')}.csv",
-                                    "text/csv"
-                                )
-                        else:
-                            st.warning("⚠️ Nenhuma aula foi gerada.")
-                            
-                    except Exception as e:
-                        st.error(f"❌ Erro ao gerar grade: {str(e)}")
-                        st.code(traceback.format_exc())
+    return totais
 
-# ============================================
-# ABA GRADE POR PROFESSOR
-# ============================================
-with abas[6]:
-    st.header("👨‍🏫 Grade Horária por Professor")
-    
-    if not st.session_state.get('aulas'):
-        st.info("ℹ️ Gere uma grade horária primeiro na aba 'Gerar Grade'.")
-    else:
-        # Filtros
-        col1, col2 = st.columns(2)
-        with col1:
-            options_set = set()
-            for a in st.session_state.aulas:
-                prof = obter_professor_aula(a)
-                if prof:
-                    options_set.add(prof)
-            options = list(sorted(options_set))
-            
-            professor_selecionado = st.selectbox(
-                "Selecionar Professor",
-                options=options,
-                key="filtro_professor_grade"
-            )
+def processar_atividades(atividades_raw: List) -> List:
+    """Processa atividades com cálculos detalhados"""
+    atividades = []
+    for a in atividades_raw:
+        custo_professor = a['custo_hora_professor'] * a['horas_semanais'] * a['semanas_mes']
+        custo_total = custo_professor + a['custo_material_mensal']
+        receita = (a['alunos'] * a['receita_aluno']) + (a['nao_alunos'] * a['receita_nao_aluno'])
         
-        if professor_selecionado:
-            # Filtrar aulas do professor
-            aulas_professor = [a for a in st.session_state.aulas if obter_professor_aula(a) == professor_selecionado]
-            
-            if not aulas_professor:
-                st.warning(f"ℹ️ Professor {professor_selecionado} não tem aulas alocadas.")
-            else:
-                st.success(f"📊 Professor {professor_selecionado}: {len(aulas_professor)} aulas")
-                
-                # Criar dataframe
-                df_professor = pd.DataFrame([
-                    {
-                        "Dia": (obter_dia_aula(a) or "").capitalize(),
-                        "Horário": f"{obter_horario_aula(a)}º ({obter_horario_real(obter_turma_aula(a), obter_horario_aula(a))})",
-                        "Turma": obter_turma_aula(a),
-                        "Disciplina": obter_disciplina_aula(a),
-                        "Segmento": obter_segmento_aula(a) or obter_segmento_turma(obter_turma_aula(a))
-                    }
-                    for a in aulas_professor
-                ])
-                
-                # Ordenar
-                ordem_dias = {"Segunda": 1, "Terca": 2, "Quarta": 3, "Quinta": 4, "Sexta": 5}
-                df_professor['Ordem'] = df_professor['Dia'].map(ordem_dias)
-                df_professor = df_professor.sort_values(['Ordem', 'Horário']).drop('Ordem', axis=1)
-                
-                st.dataframe(df_professor, width='stretch')
+        atividades.append({
+            **a,
+            'custo_professor_mensal': custo_professor,
+            'custo_total_mensal': custo_total,
+            'receita_mensal': receita,
+            'lucro_mensal': receita - custo_total,
+            'margem_atividade': (receita - custo_total) / receita * 100 if receita > 0 else 0
+        })
+    return atividades
 
-# ============================================
-# ABA DIAGNÓSTICO
-# ============================================
-with abas[7]:
-    st.header("🔧 DIAGNÓSTICO AVANÇADO DO SISTEMA")
-    
-    st.subheader("📊 Análise de Capacidade")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        total_necessario = 0
-        for turma in st.session_state.turmas:
-            grupo_turma = obter_grupo_seguro(turma)
-            for disc in st.session_state.disciplinas:
-                if turma.nome in disc.turmas and obter_grupo_seguro(disc) == grupo_turma:
-                    total_necessario += disc.carga_semanal
-        st.metric("Aulas Necessárias", total_necessario)
-    
-    with col2:
-        capacidade_total = 0
-        for turma in st.session_state.turmas:
-            horarios = obter_horarios_turma(turma.nome)
-            capacidade_total += len(horarios) * 5
-        st.metric("Capacidade Disponível", capacidade_total)
-    
-    with col3:
-        if capacidade_total >= total_necessario:
-            st.success("✅ Capacidade OK")
-        else:
-            st.error(f"❌ Déficit: {total_necessario - capacidade_total} aulas")
-    
-    # Análise de professores
-    st.subheader("👨‍🏫 Análise de Professores")
-    
-    professores_problema = []
-    for prof in st.session_state.professores:
-        dias_disponiveis = len(prof.disponibilidade) if hasattr(prof, 'disponibilidade') else 0
-        if dias_disponiveis < 3:
-            professores_problema.append(f"**{prof.nome}**: Apenas {dias_disponiveis} dia(s) disponível(is)")
-    
-    if professores_problema:
-        st.warning("⚠️ Professores com pouca disponibilidade:")
-        for problema in professores_problema:
-            st.markdown(f"- {problema}")
-    else:
-        st.success("✅ Todos professores têm disponibilidade razoável")
-    
-    # Botão para otimização manual
-    st.subheader("⚙️ Ferramentas de Otimização")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("🔄 Rebalancear Professores", use_container_width=True):
-            st.info("""
-            **Sugestões de rebalanceamento:**
-            
-            1. Verifique professores com muitas disciplinas
-            2. Distribua disciplinas entre professores do mesmo grupo
-            3. Considere professores 'AMBOS' para cobrir falta
-            """)
-    
-    with col2:
-        if st.button("📅 Analisar Conflitos", use_container_width=True):
-            if st.session_state.get('aulas'):
-                diagnostico = diagnosticar_grade(
-                    st.session_state.turmas,
-                    st.session_state.professores,
-                    st.session_state.disciplinas,
-                    st.session_state.aulas
-                )
-                
-                if diagnostico['horarios_conflitantes']:
-                    st.error("Conflitos encontrados:")
-                    for conflito in diagnostico['horarios_conflitantes']:
-                        st.write(f"- {conflito['turma']} ({conflito['dia']}, {conflito['horario']}º): {', '.join(conflito['disciplinas'])}")
-                else:
-                    st.success("✅ Nenhum conflito de horário encontrado")
-    
-    # Grades salvas
-    if hasattr(st.session_state, 'grades_salvas') and st.session_state.grades_salvas:
-        st.subheader("💾 Grades Salvas")
-        
-        for nome_grade, dados_grade in st.session_state.grades_salvas.items():
-            with st.expander(f"📁 {nome_grade} ({dados_grade['total_aulas']} aulas)"):
-                st.write(f"**Data:** {dados_grade['data']}")
-                st.write(f"**Configuração:** {dados_grade['config']}")
-                
-                if st.button(f"Carregar Grade '{nome_grade}'", key=f"load_{nome_grade}"):
-                    st.session_state.aulas = dados_grade['aulas']
-                    st.success(f"✅ Grade '{nome_grade}' carregada!")
-                    st.rerun()
-
-# ============================================
-# SIDEBAR
-# ============================================
-st.sidebar.title("⚙️ Configurações")
-if st.sidebar.button("🔄 Resetar Banco de Dados"):
+def salvar_no_banco(dados: Dict, resultados: Dict, analise_ia: Dict):
+    """Salva simulação no banco"""
     try:
-        database.resetar_banco()
-        st.sidebar.success("✅ Banco resetado! Recarregue a página.")
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO simulacoes (
+            nome, data_criacao, data_atualizacao, total_alunos, total_participantes,
+            investimento_total, custo_mensal_total, receita_mensal_total,
+            lucro_mensal_total, payback_meses, roi_percentual, margem_lucro,
+            dados_completos, analise_ia
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            dados.get('nome', 'Simulação IA'),
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            resultados['total_alunos'],
+            resultados['total_participantes'],
+            resultados['investimento_inicial'],
+            resultados['custo_mensal_total'],
+            resultados['receita_mensal_atividades'],
+            resultados['lucro_mensal'],
+            resultados.get('payback_meses', 0),
+            resultados.get('roi_percentual', 0),
+            resultados.get('margem_lucro', 0),
+            json.dumps({
+                'entrada': dados,
+                'resultados': resultados,
+                'atividades': processar_atividades(dados.get('atividades', []))
+            }),
+            json.dumps(analise_ia)
+        ))
+        
+        simulacao_id = cursor.lastrowid
+        
+        # Salvar atividades
+        for atividade in processar_atividades(dados.get('atividades', [])):
+            cursor.execute('''
+            INSERT INTO atividades_simulacao (
+                simulacao_id, segmento, nome_atividade, custo_hora_professor,
+                horas_semanais, semanas_mes, alunos, nao_alunos,
+                receita_aluno, receita_nao_aluno, custo_material_mensal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                simulacao_id,
+                atividade['segmento'],
+                atividade['nome'],
+                atividade['custo_hora_professor'],
+                atividade['horas_semanais'],
+                atividade['semanas_mes'],
+                atividade['alunos'],
+                atividade['nao_alunos'],
+                atividade['receita_aluno'],
+                atividade['receita_nao_aluno'],
+                atividade['custo_material_mensal']
+            ))
+        
+        conn.commit()
+        conn.close()
+        print(f"✅ Simulação #{simulacao_id} salva com análise de IA!")
+        
     except Exception as e:
-        st.sidebar.error(f"❌ Erro ao resetar: {str(e)}")
+        print(f"⚠️ Erro ao salvar no banco: {e}")
 
-st.sidebar.write("### Status do Sistema:")
-st.sidebar.write(f"**Turmas:** {len(st.session_state.turmas)}")
-st.sidebar.write(f"**Professores:** {len(st.session_state.professores)}")
-st.sidebar.write(f"**Disciplinas:** {len(st.session_state.disciplinas)}")
-st.sidebar.write(f"**Salas:** {len(st.session_state.salas)}")
-st.sidebar.write(f"**Aulas na Grade:** {len(st.session_state.get('aulas', []))}")
+@app.route('/resultado_com_ia')
+def resultado_com_ia():
+    """Página de resultados com análise de IA"""
+    if 'simulacao_com_ia' not in session:
+        return redirect('/simulacao')
+    
+    dados = session['simulacao_com_ia']
+    resultados = dados['resultados']
+    analise_ia = dados['analise_ia']
+    atividades = dados['atividades_detalhadas']
+    nome_simulacao = dados['nome_simulacao']
+    
+    # HTML para análise de IA
+    analise_html = f'''
+    <div class="analise-ia">
+        <h4><i class="fas fa-robot"></i> Análise de Inteligência Artificial</h4>
+        <div class="mt-3">
+            {formatar_analise_ia(analise_ia['analise_completa'])}
+        </div>
+    </div>
+    '''
+    
+    # HTML para alertas
+    alertas_html = ""
+    if analise_ia.get('alertas'):
+        for alerta in analise_ia['alertas']:
+            alertas_html += f'''
+            <div class="alert alert-{"danger" if alerta["tipo"] == "alto" else "warning"}">
+                <i class="fas fa-exclamation-triangle"></i> <strong>{alerta["mensagem"]}</strong>
+                <br><small>{alerta["acao"]}</small>
+            </div>
+            '''
+    
+    # HTML para pontos fortes
+    pontos_html = ""
+    if analise_ia.get('pontos_fortes'):
+        for ponto in analise_ia['pontos_fortes']:
+            pontos_html += f'''
+            <div class="alert alert-success">
+                <i class="fas fa-check-circle"></i> <strong>{ponto["aspecto"]}:</strong> {ponto["detalhe"]}
+            </div>
+            '''
+    
+    # HTML para recomendações
+    recomendacoes_html = ""
+    if analise_ia.get('recomendacoes'):
+        recomendacoes_html = '<h5><i class="fas fa-lightbulb"></i> Recomendações da IA</h5><ul>'
+        for rec in analise_ia['recomendacoes'][:5]:
+            recomendacoes_html += f'<li>{rec}</li>'
+        recomendacoes_html += '</ul>'
+    
+    # HTML para plano de ação
+    plano_acao_html = ""
+    if analise_ia.get('plano_acao'):
+        plano_acao_html = '<h5><i class="fas fa-clipboard-list"></i> Plano de Ação</h5><ul>'
+        for passo in analise_ia['plano_acao'][:6]:
+            plano_acao_html += f'<li>{passo}</li>'
+        plano_acao_html += '</ul>'
+    
+    # Tabela de resultados
+    resultados_html = f'''
+    <table class="table table-bordered">
+        <thead class="table-dark">
+            <tr>
+                <th colspan="2" class="text-center">RESUMO FINANCEIRO</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>Investimento Inicial</strong></td>
+                <td class="text-end">R$ {resultados.get('investimento_inicial', 0):,.2f}</td>
+            </tr>
+            <tr>
+                <td><strong>Receita Mensal</strong></td>
+                <td class="text-end text-success">R$ {resultados.get('receita_mensal_atividades', 0):,.2f}</td>
+            </tr>
+            <tr>
+                <td><strong>Custo Mensal Total</strong></td>
+                <td class="text-end text-danger">R$ {resultados.get('custo_mensal_total', 0):,.2f}</td>
+            </tr>
+            <tr class="table-info">
+                <td><strong>Lucro Mensal</strong></td>
+                <td class="text-end"><strong>R$ {resultados.get('lucro_mensal', 0):,.2f}</strong></td>
+            </tr>
+            <tr>
+                <td><strong>Margem de Lucro</strong></td>
+                <td class="text-end">
+                    <span class="badge badge-fixed { 'bg-success' if resultados.get('margem_lucro', 0) >= 25 else 'bg-warning' if resultados.get('margem_lucro', 0) >= 15 else 'bg-danger' }">
+                        {resultados.get('margem_lucro', 0):.1f}%
+                    </span>
+                </td>
+            </tr>
+            <tr>
+                <td><strong>ROI ({resultados.get('meses_analise', 24)} meses)</strong></td>
+                <td class="text-end">
+                    <span class="badge badge-fixed { 'bg-success' if resultados.get('roi_percentual', 0) >= 100 else 'bg-warning' if resultados.get('roi_percentual', 0) >= 50 else 'bg-danger' }">
+                        {resultados.get('roi_percentual', 0):.1f}%
+                    </span>
+                </td>
+            </tr>
+            <tr>
+                <td><strong>Payback (meses)</strong></td>
+                <td class="text-end">
+                    <span class="badge badge-fixed { 'bg-success' if resultados.get('payback_meses', 0) <= 24 else 'bg-warning' if resultados.get('payback_meses', 0) <= 36 else 'bg-danger' }">
+                        {resultados.get('payback_meses', 0):.1f} meses
+                    </span>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+    '''
+    
+    # Tabela de atividades
+    atividades_html = ""
+    if atividades:
+        atividades_html = '''
+        <div class="card mt-4">
+            <div class="card-header bg-light">
+                <h5 class="mb-0"><i class="fas fa-tasks"></i> Detalhamento das Atividades</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover table-sm mb-0 table-fixed">
+                        <thead class="table-light">
+                            <tr>
+                                <th class="col-atividade-nome">Atividade</th>
+                                <th class="col-atividade-segmento">Segmento</th>
+                                <th class="col-atividade-alunos text-center">Alunos</th>
+                                <th class="col-atividade-nao-alunos text-center">Não-Alunos</th>
+                                <th class="col-atividade-receita text-end">Receita</th>
+                                <th class="col-atividade-custo text-end">Custo</th>
+                                <th class="col-atividade-lucro text-end">Lucro</th>
+                                <th class="col-atividade-margem text-center">Margem</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+        '''
+        
+        for ativ in atividades:
+            atividades_html += f'''
+                            <tr>
+                                <td class="col-atividade-nome">
+                                    <span class="text-truncate-cell" title="{ativ.get('nome', 'Sem nome')}">
+                                        {ativ.get('nome', 'Sem nome')}
+                                    </span>
+                                </td>
+                                <td class="col-atividade-segmento">
+                                    <span class="badge badge-fixed" style="background-color: {SEGMENTOS.get(ativ.get('segmento', 'ei'), {}).get('cor', '#ccc')}">
+                                        {SEGMENTOS.get(ativ.get('segmento', 'ei'), {}).get('nome', 'EI')}
+                                    </span>
+                                </td>
+                                <td class="col-atividade-alunos text-center">{ativ.get('alunos', 0)}</td>
+                                <td class="col-atividade-nao-alunos text-center">{ativ.get('nao_alunos', 0)}</td>
+                                <td class="col-atividade-receita text-end text-success">R$ {ativ.get('receita_mensal', 0):,.2f}</td>
+                                <td class="col-atividade-custo text-end text-danger">R$ {ativ.get('custo_total_mensal', 0):,.2f}</td>
+                                <td class="col-atividade-lucro text-end { 'text-success' if ativ.get('lucro_mensal', 0) > 0 else 'text-danger' }">
+                                    R$ {ativ.get('lucro_mensal', 0):,.2f}
+                                </td>
+                                <td class="col-atividade-margem text-center">
+                                    <span class="badge badge-fixed { 'bg-success' if ativ.get('margem_atividade', 0) >= 30 else 'bg-warning' if ativ.get('margem_atividade', 0) >= 15 else 'bg-danger' }">
+                                        {ativ.get('margem_atividade', 0):.1f}%
+                                    </span>
+                                </td>
+                            </tr>
+            '''
+        
+        atividades_html += '''
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        '''
+    
+    content = f'''
+    <div class="row">
+        <div class="col-lg-12">
+            <div class="card shadow mb-4">
+                <div class="card-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                    <h3 class="mb-0"><i class="fas fa-chart-line"></i> Resultados da Simulação: {nome_simulacao}</h3>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-8">
+                            {analise_html}
+                        </div>
+                        <div class="col-md-4">
+                            {resultados_html}
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-md-6">
+                            {alertas_html}
+                            {pontos_html}
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header bg-info text-white">
+                                    <h5 class="mb-0"><i class="fas fa-bullseye"></i> Benchmarks do Setor</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="benchmark-card">
+                                        <h6><i class="fas fa-tachometer-alt"></i> Margem de Lucro Ideal</h6>
+                                        <div class="progress">
+                                            <div class="progress-bar { 'bg-success' if resultados.get('margem_lucro', 0) >= 30 else 'bg-warning' if resultados.get('margem_lucro', 0) >= 15 else 'bg-danger' }" 
+                                                 style="width: {min(resultados.get('margem_lucro', 0), 100)}%">
+                                                {resultados.get('margem_lucro', 0):.1f}% (Meta: 30%)
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="benchmark-card">
+                                        <h6><i class="fas fa-chart-line"></i> ROI Mínimo Aceitável</h6>
+                                        <div class="progress">
+                                            <div class="progress-bar { 'bg-success' if resultados.get('roi_percentual', 0) >= 100 else 'bg-warning' if resultados.get('roi_percentual', 0) >= 50 else 'bg-danger' }" 
+                                                 style="width: {min(resultados.get('roi_percentual', 0) / 2, 100)}%">
+                                                {resultados.get('roi_percentual', 0):.1f}% (Meta: 100%)
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="benchmark-card">
+                                        <h6><i class="fas fa-clock"></i> Payback Máximo Recomendado</h6>
+                                        <div class="progress">
+                                            <div class="progress-bar { 'bg-success' if resultados.get('payback_meses', 0) <= 24 else 'bg-warning' if resultados.get('payback_meses', 0) <= 36 else 'bg-danger' }" 
+                                                 style="width: {max(0, 100 - (resultados.get('payback_meses', 0) / 36 * 100))}%">
+                                                {resultados.get('payback_meses', 0):.1f} meses (Máx: 36 meses)
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header bg-warning text-white">
+                                    <h5 class="mb-0"><i class="fas fa-lightbulb"></i> Recomendações e Plano de Ação</h5>
+                                </div>
+                                <div class="card-body">
+                                    {recomendacoes_html}
+                                    {plano_acao_html}
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-header bg-success text-white">
+                                    <h5 class="mb-0"><i class="fas fa-chart-pie"></i> Distribuição</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="chart-container">
+                                        <canvas id="graficoResultados"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-12">
+                            {atividades_html}
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-12 text-center">
+                            <a href="/simulacao" class="btn btn-primary btn-lg me-3">
+                                <i class="fas fa-plus"></i> Nova Simulação
+                            </a>
+                            <a href="/dashboard" class="btn btn-secondary btn-lg">
+                                <i class="fas fa-chart-line"></i> Ver Dashboard
+                            </a>
+                            <button onclick="window.print()" class="btn btn-info btn-lg ms-3">
+                                <i class="fas fa-print"></i> Imprimir Relatório
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {{
+        // Gráfico de pizza
+        const ctx = document.getElementById('graficoResultados').getContext('2d');
+        new Chart(ctx, {{
+            type: 'pie',
+            data: {{
+                labels: ['Investimento', 'Receita Mensal', 'Custo Mensal', 'Lucro Mensal'],
+                datasets: [{{
+                    data: [
+                        {resultados.get('investimento_inicial', 0)},
+                        {resultados.get('receita_mensal_atividades', 0)},
+                        {resultados.get('custo_mensal_total', 0)},
+                        {resultados.get('lucro_mensal', 0)}
+                    ],
+                    backgroundColor: [
+                        '#FF6B8B',
+                        '#4ECDC4',
+                        '#45B7D1',
+                        '#FF9F1C'
+                    ]
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{
+                        position: 'bottom'
+                    }}
+                }}
+            }}
+        }});
+    }});
+    </script>
+    '''
+    
+    return get_base_html(f"Resultados: {nome_simulacao}", content)
 
-st.sidebar.write("### 💡 Informações dos Horários:")
-st.sidebar.write("**EF II:** 07:50-12:20")
-st.sidebar.write("- 5 períodos + intervalo")
-st.sidebar.write("**EM:** 07:00-13:10")
-st.sidebar.write("- 7 períodos + intervalo")
+@app.route('/dashboard')
+def dashboard():
+    """Dashboard com histórico de simulações"""
+    try:
+        conn = sqlite3.connect(DATABASE)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT id, nome, data_criacao, total_participantes, investimento_total,
+               receita_mensal_total, lucro_mensal_total, margem_lucro,
+               roi_percentual, payback_meses
+        FROM simulacoes 
+        ORDER BY data_criacao DESC 
+        LIMIT 20
+        ''')
+        
+        simulacoes = cursor.fetchall()
+        
+        # Estatísticas
+        cursor.execute('''
+        SELECT COUNT(*) as total, 
+               AVG(margem_lucro) as avg_margem,
+               AVG(roi_percentual) as avg_roi,
+               SUM(investimento_total) as total_investido,
+               SUM(receita_mensal_total) as total_receita
+        FROM simulacoes
+        ''')
+        
+        stats = cursor.fetchone()
+        conn.close()
+        
+        # HTML para tabela
+        tabela_html = ""
+        if simulacoes:
+            tabela_html = '''
+            <div class="card mb-4">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0"><i class="fas fa-history"></i> Histórico de Simulações</h5>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0 table-fixed">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th class="col-nome">Nome</th>
+                                    <th class="col-data">Data</th>
+                                    <th class="col-participantes text-center">Part.</th>
+                                    <th class="col-investimento text-end">Investimento</th>
+                                    <th class="col-receita text-end">Receita/Mês</th>
+                                    <th class="col-lucro text-end">Lucro/Mês</th>
+                                    <th class="col-margem text-center">Margem</th>
+                                    <th class="col-roi text-center">ROI</th>
+                                    <th class="col-payback text-center">Payback</th>
+                                    <th class="col-acoes text-center">Ações</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+            '''
+            
+            for sim in simulacoes:
+                tabela_html += f'''
+                                <tr>
+                                    <td class="col-nome">
+                                        <span class="text-truncate-cell" title="{sim['nome']}">
+                                            {sim['nome']}
+                                        </span>
+                                    </td>
+                                    <td class="col-data">{sim['data_criacao'][:10]}</td>
+                                    <td class="col-participantes text-center">{sim['total_participantes']}</td>
+                                    <td class="col-investimento text-end">R$ {sim['investimento_total']:,.0f}</td>
+                                    <td class="col-receita text-end text-success">R$ {sim['receita_mensal_total']:,.0f}</td>
+                                    <td class="col-lucro text-end { 'text-success' if sim['lucro_mensal_total'] > 0 else 'text-danger' }">
+                                        R$ {sim['lucro_mensal_total']:,.0f}
+                                    </td>
+                                    <td class="col-margem text-center">
+                                        <span class="badge badge-fixed { 'bg-success' if sim['margem_lucro'] >= 25 else 'bg-warning' if sim['margem_lucro'] >= 15 else 'bg-danger' }">
+                                            {sim['margem_lucro']:.1f}%
+                                        </span>
+                                    </td>
+                                    <td class="col-roi text-center">
+                                        <span class="badge badge-fixed { 'bg-success' if sim['roi_percentual'] >= 100 else 'bg-warning' if sim['roi_percentual'] >= 50 else 'bg-danger' }">
+                                            {sim['roi_percentual']:.1f}%
+                                        </span>
+                                    </td>
+                                    <td class="col-payback text-center">
+                                        <span class="badge badge-fixed { 'bg-success' if sim['payback_meses'] <= 24 else 'bg-warning' if sim['payback_meses'] <= 36 else 'bg-danger' }">
+                                            {sim['payback_meses']:.1f} m
+                                        </span>
+                                    </td>
+                                    <td class="col-acoes text-center">
+                                        <div class="btn-group btn-group-sm" role="group">
+                                            <a href="/simulacao/{sim['id']}" class="btn btn-warning" title="Editar">
+                                                <i class="fas fa-edit"></i>
+                                            </a>
+                                            <a href="/resultado_com_ia" class="btn btn-info" title="Ver Resultados" onclick="sessionStorage.setItem('simulacao_id', {sim['id']})">
+                                                <i class="fas fa-eye"></i>
+                                            </a>
+                                            <button class="btn btn-danger" title="Excluir" onclick="excluirSimulacao({sim['id']})">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </div>
+                                    </td>
+                                </tr>
+                '''
+            
+            tabela_html += '''
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            '''
+        else:
+            tabela_html = '''
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i> Nenhuma simulação encontrada. 
+                <a href="/simulacao" class="alert-link">Crie sua primeira simulação</a>.
+            </div>
+            '''
+        
+        content = f'''
+        <div class="row">
+            <div class="col-lg-12">
+                <div class="card shadow mb-4">
+                    <div class="card-header bg-primary text-white">
+                        <h3 class="mb-0"><i class="fas fa-chart-line"></i> Dashboard - Histórico de Simulações</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="row mb-4">
+                            <div class="col-md-3">
+                                <div class="card bg-success text-white">
+                                    <div class="card-body text-center">
+                                        <h2><i class="fas fa-calculator"></i></h2>
+                                        <h4>{stats['total']}</h4>
+                                        <p class="mb-0">Simulações</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="card bg-info text-white">
+                                    <div class="card-body text-center">
+                                        <h2><i class="fas fa-percentage"></i></h2>
+                                        <h4>{stats['avg_margem']:.1f}%</h4>
+                                        <p class="mb-0">Margem Média</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="card bg-warning text-white">
+                                    <div class="card-body text-center">
+                                        <h2><i class="fas fa-chart-line"></i></h2>
+                                        <h4>{stats['avg_roi']:.1f}%</h4>
+                                        <p class="mb-0">ROI Médio</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="card bg-danger text-white">
+                                    <div class="card-body text-center">
+                                        <h2><i class="fas fa-money-bill-wave"></i></h2>
+                                        <h4>R$ {stats['total_investido']:,.0f}</h4>
+                                        <p class="mb-0">Total Investido</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        {tabela_html}
+                        
+                        <div class="row mt-4">
+                            <div class="col-12">
+                                <div class="card">
+                                    <div class="card-header bg-secondary text-white">
+                                        <h5 class="mb-0"><i class="fas fa-chart-bar"></i> Análise Comparativa</h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="chart-container">
+                                            <canvas id="dashboardChart"></canvas>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {{
+            // Gráfico do dashboard
+            const ctx = document.getElementById('dashboardChart').getContext('2d');
+            new Chart(ctx, {{
+                type: 'bar',
+                data: {{
+                    labels: ['Margem Média', 'ROI Médio', 'Payback Médio'],
+                    datasets: [{{
+                        label: 'Seu Desempenho',
+                        data: [{stats['avg_margem']}, {stats['avg_roi']}, 0],
+                        backgroundColor: '#4361ee'
+                    }}, {{
+                        label: 'Benchmarks',
+                        data: [30, 100, 24],
+                        backgroundColor: '#FF9F1C'
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {{
+                        y: {{
+                            beginAtZero: true
+                        }}
+                    }}
+                }}
+            }});
+            
+            // Função para excluir simulação
+            window.excluirSimulacao = function(id) {{
+                if (confirm('Tem certeza que deseja excluir esta simulação?')) {{
+                    fetch('/api/excluir_simulacao/' + id, {{
+                        method: 'DELETE'
+                    }})
+                    .then(response => response.json())
+                    .then(data => {{
+                        if (data.success) {{
+                            location.reload();
+                        }} else {{
+                            alert('Erro ao excluir simulação: ' + (data.error || 'Erro desconhecido'));
+                        }}
+                    }})
+                    .catch(error => {{
+                        alert('Erro: ' + error.message);
+                    }});
+                }}
+            }};
+        }});
+        </script>
+        '''
+        
+        return get_base_html("Dashboard", content)
+        
+    except Exception as e:
+        print(f"Erro no dashboard: {e}")
+        return redirect('/')
 
-st.sidebar.write("### 🕒 Horários Reais:")
-st.sidebar.write("**EM (7 períodos):**")
-st.sidebar.write("1º: 07:00-07:50")
-st.sidebar.write("2º: 07:50-08:40")
-st.sidebar.write("3º: 08:40-09:30")
-st.sidebar.write("🕛 INTERVALO: 09:30-09:50")
-st.sidebar.write("4º: 09:50-10:40")
-st.sidebar.write("5º: 10:40-11:30")
-st.sidebar.write("6º: 11:30-12:20")
-st.sidebar.write("7º: 12:20-13:10")
+@app.route('/analise_ia')
+def analise_ia():
+    """Página de análise de IA avançada"""
+    content = '''
+    <div class="row">
+        <div class="col-lg-10 mx-auto">
+            <div class="card shadow">
+                <div class="card-header bg-dark text-white">
+                    <h3 class="mb-0"><i class="fas fa-brain"></i> Análise Avançada com IA</h3>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="card mb-4">
+                                <div class="card-header bg-info text-white">
+                                    <h5 class="mb-0"><i class="fas fa-robot"></i> Funcionalidades da IA</h5>
+                                </div>
+                                <div class="card-body">
+                                    <ul class="list-group list-group-flush">
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Análise de Rentabilidade:</strong> Avaliação detalhada dos indicadores financeiros
+                                        </li>
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Detecção de Riscos:</strong> Identificação de pontos críticos no plano
+                                        </li>
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Otimização de Custos:</strong> Sugestões para redução de despesas
+                                        </li>
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Benchmarking:</strong> Comparação com padrões do setor
+                                        </li>
+                                        <li class="list-group-item">
+                                            <i class="fas fa-check-circle text-success me-2"></i>
+                                            <strong>Plano de Ação Personalizado:</strong> Passos concretos para implementação
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-6">
+                            <div class="card mb-4">
+                                <div class="card-header bg-success text-white">
+                                    <h5 class="mb-0"><i class="fas fa-chart-line"></i> Como Funciona</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="mb-3">
+                                        <h6><i class="fas fa-1 text-primary"></i> Coleta de Dados</h6>
+                                        <p class="small">Você insere informações sobre atividades, custos e receitas.</p>
+                                    </div>
+                                    <div class="mb-3">
+                                        <h6><i class="fas fa-2 text-primary"></i> Processamento</h6>
+                                        <p class="small">O sistema calcula indicadores financeiros automaticamente.</p>
+                                    </div>
+                                    <div class="mb-3">
+                                        <h6><i class="fas fa-3 text-primary"></i> Análise IA</h6>
+                                        <p class="small">Inteligência Artificial analisa os dados e gera recomendações.</p>
+                                    </div>
+                                    <div class="mb-3">
+                                        <h6><i class="fas fa-4 text-primary"></i> Relatório</h6>
+                                        <p class="small">Você recebe um relatório detalhado com plano de ação.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-12">
+                            <div class="card">
+                                <div class="card-header bg-warning text-white">
+                                    <h5 class="mb-0"><i class="fas fa-lightbulb"></i> Benefícios da Análise com IA</h5>
+                                </div>
+                                <div class="card-body">
+                                    <div class="row">
+                                        <div class="col-md-4">
+                                            <div class="text-center p-3">
+                                                <i class="fas fa-clock fa-3x text-primary mb-3"></i>
+                                                <h6>Economia de Tempo</h6>
+                                                <p class="small">Análise em segundos que levaria horas manualmente</p>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <div class="text-center p-3">
+                                                <i class="fas fa-shield-alt fa-3x text-success mb-3"></i>
+                                                <h6>Redução de Riscos</h6>
+                                                <p class="small">Identificação antecipada de problemas</p>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <div class="text-center p-3">
+                                                <i class="fas fa-chart-line fa-3x text-danger mb-3"></i>
+                                                <h6>Melhores Resultados</h6>
+                                                <p class="small">Otimização da rentabilidade do projeto</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row mt-4">
+                        <div class="col-12 text-center">
+                            <a href="/simulacao" class="btn btn-primary btn-lg me-3">
+                                <i class="fas fa-rocket"></i> Começar Análise
+                            </a>
+                            <a href="/dashboard" class="btn btn-secondary btn-lg">
+                                <i class="fas fa-history"></i> Ver Histórico
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    '''
+    
+    return get_base_html("Análise com IA", content)
 
-st.sidebar.write("**EF II (5 períodos):**")
-st.sidebar.write("1º: 07:50-08:40")
-st.sidebar.write("2º: 08:40-09:30")
-st.sidebar.write("🕛 INTERVALO: 09:30-09:50")
-st.sidebar.write("3º: 09:50-10:40")
-st.sidebar.write("4º: 10:40-11:30")
-st.sidebar.write("5º: 11:30-12:20")
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
