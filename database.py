@@ -90,7 +90,7 @@ def criar_dados_iniciais():
         Disciplina("Sociologia B", 2, "media", ["1emB", "2emB", "3emB"], "B"),
         Disciplina("Informática B", 2, "leve", ["6anoB", "7anoB", "8anoB", "9anoB", "1emB", "2emB", "3emB"], "B"),
         Disciplina("Dinâmica B", 2, "leve", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
-        Disciplina("Vida Pratica B", 1, "leve", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
+        Disciplina("Vida Pratica B", 2, "leve", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
     ]
 
     
