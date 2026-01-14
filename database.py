@@ -75,8 +75,8 @@ def criar_dados_iniciais():
         
         # GRUPO B - TURMAS B
         Disciplina("Português B", 4, "pesada", ["6anoB", "7anoB", "8anoB", "9anoB", "1emB", "2emB", "3emB"], "B"),
-        Disciplina("Matemática B EF_II",4, "pesada", ["1emB", "2emB", "3emB"], "B"),
-        Disciplina("Matemática B EM", 4, "pesada", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
+        Disciplina("Matemática B EM",4, "pesada", ["1emB", "2emB", "3emB"], "B"),
+        Disciplina("Matemática B EF_II", 4, "pesada", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
         Disciplina("História B", 2, "media", ["6anoB", "7anoB", "8anoB", "9anoB", "1emB", "2emB", "3emB"], "B"),
         Disciplina("Geografia B", 2, "media", ["6anoB", "7anoB", "8anoB", "9anoB", "1emB", "2emB", "3emB"], "B"),
         Disciplina("Ciências B", 2, "media", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
@@ -89,8 +89,8 @@ def criar_dados_iniciais():
         Disciplina("Filosofia B", 2, "media", ["1emB", "2emB", "3emB"], "B"),
         Disciplina("Sociologia B", 2, "media", ["1emB", "2emB", "3emB"], "B"),
         Disciplina("Informática B", 2, "leve", ["6anoB", "7anoB", "8anoB", "9anoB", "1emB", "2emB", "3emB"], "B"),
-        Disciplina("Dinâmica B", 1, "leve", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
-        Disciplina("Vida Pratica B", 1, "leve", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
+        Disciplina("Dinâmica B", 2, "leve", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
+        Disciplina("Vida Pratica B", 3, "leve", ["6anoB", "7anoB", "8anoB", "9anoB"], "B"),
     ]
 
     
