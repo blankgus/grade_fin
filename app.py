@@ -2663,7 +2663,7 @@ with abas[5]:
         st.error("❌ Capacidade dos professores insuficiente! Adicione mais professores ou aumente limites.")
     else:
         st.success("✅ Pronto para gerar grade!")
-        if st.button("🧠 Gerar Grade Inteligente (vFinal)", type="primary", use_container_width=True):
+    if st.button("🧠 Gerar Grade Inteligente (vFinal)", type="primary", use_container_width=True):
     if not st.session_state.get('turmas') or not st.session_state.get('professores'):
         st.error("❌ Cadastre turmas e professores antes de gerar a grade!")
     else:
