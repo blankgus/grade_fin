@@ -1,4 +1,4 @@
-# app_corrigido_v2.py - Versão COMPLETA com correção de horários REAIS
+ # app_corrigido_v2.py - Versão COMPLETA com correção de horários REAIS
 import streamlit as st
 import pandas as pd
 import database
